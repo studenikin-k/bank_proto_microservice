@@ -1,0 +1,14 @@
+.idea/
+*.iml
+
+# Go
+*.exe
+*.test
+*.out
+
+# Environment
+.env
+
+# OS
+.DS_Store
+Thumbs.db

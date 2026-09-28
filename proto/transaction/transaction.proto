@@ -1,0 +1,60 @@
+syntax = "proto3";
+
+package transaction;
+
+option go_package = "bank-prototype/proto/transaction;transactionpb";
+
+service TransactionService {
+  rpc Transfer(TransferRequest) returns (TransactionResponse);
+  rpc Payment(PaymentRequest) returns (TransactionResponse);
+  rpc TransferAsync(TransferRequest) returns (AsyncResponse);
+  rpc GetHistory(GetHistoryRequest) returns (TransactionListResponse);
+  rpc GetByID(GetByIDRequest) returns (TransactionResponse);
+}
+
+message TransferRequest {
+  string user_id = 1;
+  string from_account_id = 2;
+  string to_account_id = 3;
+  double amount = 4;
+}
+
+message PaymentRequest {
+  string user_id = 1;
+  string from_account_id = 2;
+  string to_account_id = 3;
+  double amount = 4;
+}
+
+message TransactionResponse {
+  string id = 1;
+  string type = 2;
+  string from_account_id = 3;
+  string to_account_id = 4;
+  double amount = 5;
+  int32 fee_percent = 6;
+  double fee_amount = 7;
+  double total_debit = 8;
+  string status = 9;
+  string created_at = 10;
+}
+
+message AsyncResponse {
+  string status = 1;  // "accepted"
+  string message = 2; // "Transaction is being processed"
+}
+
+message GetHistoryRequest {
+  string user_id = 1;
+  optional string account_id = 2; // Опциональный фильтр
+}
+
+message GetByIDRequest {
+  string user_id = 1;
+  string transaction_id = 2;
+}
+
+message TransactionListResponse {
+  repeated TransactionResponse transactions = 1;
+  int32 total = 2;
+}

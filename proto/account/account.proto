@@ -1,0 +1,70 @@
+syntax = "proto3";
+
+package account;
+
+option go_package = "bank-prototype/proto/account;accountpb";
+
+service AccountService {
+  rpc CreateAccount(CreateAccountRequest) returns (AccountResponse);
+  rpc GetAccount(GetAccountRequest) returns (AccountResponse);
+  rpc GetUserAccounts(GetUserAccountsRequest) returns (AccountListResponse);
+  rpc DeleteAccount(DeleteAccountRequest) returns (DeleteAccountResponse);
+
+  // Метод вызывается Transaction Service для атомарного списания/начисления
+  rpc UpdateBalance(UpdateBalanceRequest) returns (UpdateBalanceResponse);
+}
+
+message CreateAccountRequest {
+  string user_id = 1;
+}
+
+message GetAccountRequest {
+  string account_id = 1;
+  string user_id = 2;
+}
+
+message GetUserAccountsRequest {
+  string user_id = 1;
+}
+
+message DeleteAccountRequest {
+  string account_id = 1;
+  string user_id = 2;
+}
+
+message DeleteAccountResponse {
+  bool success = 1;
+  string message = 2;
+  string account_id = 3;
+}
+
+message AccountResponse {
+  string id = 1;
+  string user_id = 2;
+  double balance = 3;
+  string status = 4;
+  string created_at = 5;
+}
+
+message AccountListResponse {
+  repeated AccountResponse accounts = 1;
+  int32 total = 2;
+  int32 active_count = 3;
+  int32 closed_count = 4;
+  int32 max_accounts = 5;
+  bool can_create_more = 6;
+}
+
+message UpdateBalanceRequest {
+  string from_account_id = 1;
+  string to_account_id = 2;
+  double amount = 3;
+  double fee_amount = 4;
+  double total_debit = 5;
+  string fee_account_id = 6;
+}
+
+message UpdateBalanceResponse {
+  bool success = 1;
+  string error_message = 2;
+}

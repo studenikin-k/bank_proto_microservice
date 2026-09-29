@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  # 1. БД Пользователей (Auth Service)
+  postgres_auth:
+    image: postgres:16-alpine
+    container_name: bank_postgres_auth
+    environment:
+      POSTGRES_USER: auth_user
+      POSTGRES_PASSWORD: auth_password
+      POSTGRES_DB: auth_db
+    ports:
+      - "5431:5432"
+    volumes:
+      - pg_auth_data:/var/lib/postgresql/data
+      - ./migrations/auth/000001_init_auth.up.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+
+  # 2. БД Счетов (Account Service)
+  postgres_accounts:
+    image: postgres:16-alpine
+    container_name: bank_postgres_accounts
+    environment:
+      POSTGRES_USER: account_user
+      POSTGRES_PASSWORD: account_password
+      POSTGRES_DB: account_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_account_data:/var/lib/postgresql/data
+      - ./migrations/account/000001_init_account.up.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+
+  # 3. БД Транзакций (Transaction Service)
+  postgres_transactions:
+    image: postgres:16-alpine
+    container_name: bank_postgres_transactions
+    environment:
+      POSTGRES_USER: tx_user
+      POSTGRES_PASSWORD: tx_password
+      POSTGRES_DB: tx_db
+    ports:
+      - "5433:5432"
+    volumes:
+      - pg_tx_data:/var/lib/postgresql/data
+      - ./migrations/transaction/000001_init_transaction.up.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+
+  # 4. Общий Redis с изоляцией
+  redis:
+    image: redis:7.4-alpine
+    container_name: bank_redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+volumes:
+  pg_auth_data:
+  pg_account_data:
+  pg_tx_data:

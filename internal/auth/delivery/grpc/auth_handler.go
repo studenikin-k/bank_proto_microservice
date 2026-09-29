@@ -7,6 +7,7 @@ import (
 	"bank_proto_microservice/internal/auth/models"
 	"bank_proto_microservice/internal/auth/repository"
 	"bank_proto_microservice/internal/auth/service"
+	"bank_proto_microservice/internal/utils"
 	authpb "bank_proto_microservice/proto/auth"
 
 	"google.golang.org/grpc/codes"
@@ -20,6 +21,7 @@ type AuthServer struct {
 }
 
 func NewAuthServer(authService *service.AuthService, userRepo *repository.UserRepository) *AuthServer {
+	utils.LogSuccess("AuthServer", "Инициализирован gRPC сервер AuthService")
 	return &AuthServer{
 		authService: authService,
 		userRepo:    userRepo,
@@ -27,27 +29,36 @@ func NewAuthServer(authService *service.AuthService, userRepo *repository.UserRe
 }
 
 func (s *AuthServer) Register(ctx context.Context, req *authpb.RegisterRequest) (*authpb.RegisterResponse, error) {
-	if req.GetName() == "" || req.GetPassword() == "" {
+	name := req.GetName()
+	utils.LogInfo("AuthServer", "Запрос регистрации пользователя: %s", name)
+
+	if name == "" || req.GetPassword() == "" {
+		utils.LogWarning("AuthServer", "Отсутствуют имя или пароль")
 		return nil, status.Error(codes.InvalidArgument, "Имя и пароль обязательны")
 	}
 
 	if len(req.GetPassword()) < 6 {
+		utils.LogWarning("AuthServer", "Пароль слишком короткий для пользователя %s", name)
 		return nil, status.Error(codes.InvalidArgument, "Пароль должен быть не менее 6 символов")
 	}
 
 	hash, err := s.authService.HashPassword(req.GetPassword())
 	if err != nil {
+		utils.LogError("AuthServer", "Ошибка хеширования пароля", err)
 		return nil, status.Error(codes.Internal, "Ошибка хеширования пароля")
 	}
 
 	user := &models.User{
-		Name:         req.GetName(),
+		Name:         name,
 		PasswordHash: hash,
 	}
 
 	if err := s.userRepo.Create(ctx, user); err != nil {
-		return nil, status.Error(codes.AlreadyExists, "Пользователь с таким именем уже существует")
+		utils.LogError("AuthServer", "Ошибка создания пользователя в БД", err)
+		return nil, status.Errorf(codes.AlreadyExists, "Пользователь '%s' уже существует или ошибка БД", name)
 	}
+
+	utils.LogSuccess("AuthServer", "Пользователь %s успешно зарегистрирован (ID: %s)", user.Name, user.ID)
 
 	return &authpb.RegisterResponse{
 		UserId:    user.ID,
@@ -57,23 +68,32 @@ func (s *AuthServer) Register(ctx context.Context, req *authpb.RegisterRequest) 
 }
 
 func (s *AuthServer) Login(ctx context.Context, req *authpb.LoginRequest) (*authpb.LoginResponse, error) {
-	if req.GetName() == "" || req.GetPassword() == "" {
+	name := req.GetName()
+	utils.LogInfo("AuthServer", "Попытка входа пользователя: %s", name)
+
+	if name == "" || req.GetPassword() == "" {
+		utils.LogWarning("AuthServer", "Отсутствуют имя или пароль при логине")
 		return nil, status.Error(codes.InvalidArgument, "Имя и пароль обязательны")
 	}
 
-	user, err := s.userRepo.GetByName(ctx, req.GetName())
+	user, err := s.userRepo.GetByName(ctx, name)
 	if err != nil {
+		utils.LogWarning("AuthServer", "Пользователь %s не найден в базе данных", name)
 		return nil, status.Error(codes.Unauthenticated, "Неверное имя пользователя или пароль")
 	}
 
 	if err := s.authService.CheckPasswordHash(req.GetPassword(), user.PasswordHash); err != nil {
+		utils.LogWarning("AuthServer", "Неверный пароль для пользователя %s", name)
 		return nil, status.Error(codes.Unauthenticated, "Неверное имя пользователя или пароль")
 	}
 
 	token, err := s.authService.GenerateToken(user.ID)
 	if err != nil {
+		utils.LogError("AuthServer", "Ошибка генерации токена", err)
 		return nil, status.Error(codes.Internal, "Ошибка генерации токена")
 	}
+
+	utils.LogSuccess("AuthServer", "Вход выполнен успешно: %s (ID: %s)", user.Name, user.ID)
 
 	return &authpb.LoginResponse{
 		Token:     token,
@@ -84,13 +104,20 @@ func (s *AuthServer) Login(ctx context.Context, req *authpb.LoginRequest) (*auth
 }
 
 func (s *AuthServer) DeleteUser(ctx context.Context, req *authpb.DeleteUserRequest) (*authpb.DeleteUserResponse, error) {
-	if req.GetUserId() == "" {
+	userID := req.GetUserId()
+	utils.LogInfo("AuthServer", "Запрос на удаление пользователя: %s", userID)
+
+	if userID == "" {
+		utils.LogWarning("AuthServer", "user_id не передан")
 		return nil, status.Error(codes.InvalidArgument, "user_id обязателен")
 	}
 
-	if err := s.userRepo.Delete(ctx, req.GetUserId()); err != nil {
-		return nil, status.Error(codes.NotFound, "Пользователь не найден")
+	if err := s.userRepo.Delete(ctx, userID); err != nil {
+		utils.LogError("AuthServer", "Ошибка удаления пользователя", err)
+		return nil, status.Errorf(codes.NotFound, "Пользователь не найден")
 	}
+
+	utils.LogSuccess("AuthServer", "Пользователь %s успешно удалён", userID)
 
 	return &authpb.DeleteUserResponse{
 		Success: true,

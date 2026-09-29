@@ -1,7 +1,7 @@
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 CREATE TABLE accounts (
-                          id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                          id TEXT PRIMARY KEY, -- ТЕПЕРЬ ТАКЖЕ ВМЕЩАЕТ "13000000000001"
                           user_id UUID NOT NULL,
                           balance DECIMAL(15,2) NOT NULL DEFAULT 100.00,
                           status TEXT NOT NULL DEFAULT 'active',

@@ -1,7 +1,6 @@
 package service
 
 import (
-	"fmt"
 	"time"
 
 	"bank_proto_microservice/internal/utils"
@@ -16,7 +15,7 @@ type AuthService struct {
 }
 
 func NewAuthService(secret string, expiration time.Duration) *AuthService {
-	utils.LogSuccess("AuthService", fmt.Sprintf("Инициализирован сервис аутентификации (TTL: %v)", expiration))
+	utils.LogSuccess("AuthService", "Инициализирован сервис аутентификации (TTL: %v)", expiration)
 	return &AuthService{
 		jwtSecret:     secret,
 		jwtExpiration: expiration,
@@ -24,16 +23,25 @@ func NewAuthService(secret string, expiration time.Duration) *AuthService {
 }
 
 func (s *AuthService) HashPassword(password string) (string, error) {
+	utils.LogDebug("AuthService", "Хеширование пароля...")
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		utils.LogError("AuthService", "Ошибка хеширования пароля", err)
 		return "", err
 	}
+	utils.LogSuccess("AuthService", "Пароль успешно захеширован")
 	return string(hashedPassword), nil
 }
 
 func (s *AuthService) CheckPasswordHash(password, hash string) error {
-	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
+	utils.LogDebug("AuthService", "Проверка пароля...")
+	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
+	if err != nil {
+		utils.LogWarning("AuthService", "Неверный пароль")
+		return err
+	}
+	utils.LogSuccess("AuthService", "Пароль верный")
+	return nil
 }
 
 type Claims struct {
@@ -42,12 +50,22 @@ type Claims struct {
 }
 
 func (s *AuthService) GenerateToken(userID string) (string, error) {
+	utils.LogDebug("AuthService", "Генерация JWT токена для пользователя: %s", userID)
+
 	claims := &Claims{
 		UserID: userID,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(s.jwtExpiration)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
 		},
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString([]byte(s.jwtSecret))
+	signedToken, err := token.SignedString([]byte(s.jwtSecret))
+	if err != nil {
+		utils.LogError("AuthService", "Ошибка подписи токена", err)
+		return "", err
+	}
+
+	utils.LogSuccess("AuthService", "JWT токен создан для пользователя: %s", userID)
+	return signedToken, nil
 }

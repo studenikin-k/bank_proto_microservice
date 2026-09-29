@@ -64,8 +64,8 @@ func (r *RedisCache) Delete(ctx context.Context, keys ...string) error {
 }
 
 const (
-	AccountBalanceTTL = 60 * time.Second
-	UserAccountsTTL   = 300 * time.Second
+	AccountBalanceTTL = 60 * time.Minute
+	UserAccountsTTL   = 300 * time.Minute
 )
 
 func AccountBalanceKey(accountID string) string {

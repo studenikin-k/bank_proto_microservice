@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	httpPort           = ":8080"
+	defaultPort        = ":8080"
 	jwtSecret          = "super-secret-jwt-key-2026"
 	authServiceAddr    = "localhost:50051"
 	accountServiceAddr = "localhost:50052"
@@ -26,7 +26,15 @@ const (
 )
 
 func main() {
-	utils.LogInfo("Gateway", "Запуск API Gateway (Fasthttp -> gRPC)...")
+	// Читаем порт из переменной окружения PORT (например, PORT=8081)
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = defaultPort
+	} else if port[0] != ':' {
+		port = ":" + port
+	}
+
+	utils.LogInfo("Gateway", "Запуск API Gateway на порту %s (Fasthttp -> gRPC)...", port)
 
 	// 1. Инициализация gRPC-клиентов
 	authConn, err := grpc.Dial(authServiceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -60,7 +68,7 @@ func main() {
 	authMiddleware := middleware.NewAuthMiddleware(jwtSecret)
 	gatewayHandler := handlers.NewGatewayHandler(authClient, accountClient, txClient)
 
-	// 3. Роутер Fasthttp (100% совместимость со всеми тестами k6!)
+	// 3. Роутер Fasthttp
 	router := func(ctx *fasthttp.RequestCtx) {
 		path := string(ctx.Path())
 		method := string(ctx.Method())
@@ -73,7 +81,7 @@ func main() {
 			_ = json.NewEncoder(ctx).Encode(map[string]interface{}{
 				"status":  "OK",
 				"time":    time.Now().Format(time.RFC1123),
-				"message": "Bank Microservices API Gateway is running",
+				"message": "Bank Microservices API Gateway is running on port " + port,
 			})
 
 		// Публичные маршруты Auth
@@ -135,8 +143,19 @@ func main() {
 		}
 	}
 
-	utils.LogSuccess("Gateway", "HTTP сервер API Gateway запущен на порту %s", httpPort)
-	if err := fasthttp.ListenAndServe(httpPort, router); err != nil {
+	// Настроенный сервер Fasthttp с расширенным пулом соединений
+	server := &fasthttp.Server{
+		Handler:            router,
+		Name:               "Bank-API-Gateway-" + port,
+		Concurrency:        256 * 1024,
+		ReadTimeout:        15 * time.Second,
+		WriteTimeout:       15 * time.Second,
+		MaxRequestBodySize: 10 * 1024 * 1024,
+		MaxRequestsPerConn: 10000,
+	}
+
+	utils.LogSuccess("Gateway", "HTTP сервер API Gateway запущен на порту %s", port)
+	if err := server.ListenAndServe(port); err != nil {
 		utils.LogError("Gateway", "Ошибка запуска HTTP сервера", err)
 	}
 }

@@ -1,4 +1,4 @@
-export const BASE_URL = __ENV.BASE_URL || 'http://localhost:8080';
+export const BASE_URL = __ENV.BASE_URL || 'http://localhost';
 
 export const thresholds = {
     http_req_duration: ['p(95)<500', 'p(99)<1000'],

@@ -1,161 +1,92 @@
 package main
 
 import (
-	"encoding/json"
-	"os"
+	"context"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"strings"
 	"time"
 
 	"bank_proto_microservice/internal/gateway/handlers"
 	"bank_proto_microservice/internal/gateway/middleware"
 	"bank_proto_microservice/internal/utils"
-	accountpb "bank_proto_microservice/proto/account"
-	authpb "bank_proto_microservice/proto/auth"
-	transactionpb "bank_proto_microservice/proto/transaction"
 
 	"github.com/valyala/fasthttp"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-)
-
-const (
-	defaultPort        = ":8080"
-	jwtSecret          = "super-secret-jwt-key-2026"
-	authServiceAddr    = "localhost:50051"
-	accountServiceAddr = "localhost:50052"
-	txServiceAddr      = "localhost:50053"
 )
 
 func main() {
-	// Читаем порт из переменной окружения PORT (например, PORT=8081)
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = defaultPort
-	} else if port[0] != ':' {
-		port = ":" + port
-	}
+	utils.InitLogger("api-gateway")
 
-	utils.LogInfo("Gateway", "Запуск API Gateway на порту %s (Fasthttp -> gRPC)...", port)
+	port := strings.TrimPrefix(utils.Env("PORT", "8080"), ":")
+	utils.RunHealthcheckCommand(func() error { return httpHealthcheck("http://127.0.0.1:" + port + "/health") })
 
-	// 1. Инициализация gRPC-клиентов
-	authConn, err := grpc.Dial(authServiceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	jwtSecret := utils.Env("JWT_SECRET", "dev-only-jwt-secret-change-me")
+	authAddr := utils.Env("AUTH_SERVICE_ADDR", "localhost:50051")
+	accountAddr := utils.Env("ACCOUNT_SERVICE_ADDR", "localhost:50052")
+	txAddr := utils.Env("TRANSACTION_SERVICE_ADDR", "localhost:50053")
+	// Должен быть больше ACCOUNT_CALL_TIMEOUT в Transaction Service, чтобы исход
+	// перевода успел определиться до того, как шлюз ответит клиенту таймаутом.
+	requestTimeout := utils.EnvDuration("REQUEST_TIMEOUT", 5*time.Second)
+
+	authConn, err := utils.DialGRPC(authAddr)
 	if err != nil {
-		utils.LogError("Gateway", "Ошибка подключения к Auth Service", err)
-		os.Exit(1)
+		utils.Fatal("некорректный адрес Auth Service", "addr", authAddr, "err", err)
 	}
 	defer authConn.Close()
-	authClient := authpb.NewAuthServiceClient(authConn)
-	utils.LogSuccess("Gateway", "Подключено к Auth Service (%s)", authServiceAddr)
-
-	accountConn, err := grpc.Dial(accountServiceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	accountConn, err := utils.DialGRPC(accountAddr)
 	if err != nil {
-		utils.LogError("Gateway", "Ошибка подключения к Account Service", err)
-		os.Exit(1)
+		utils.Fatal("некорректный адрес Account Service", "addr", accountAddr, "err", err)
 	}
 	defer accountConn.Close()
-	accountClient := accountpb.NewAccountServiceClient(accountConn)
-	utils.LogSuccess("Gateway", "Подключено к Account Service (%s)", accountServiceAddr)
-
-	txConn, err := grpc.Dial(txServiceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	txConn, err := utils.DialGRPC(txAddr)
 	if err != nil {
-		utils.LogError("Gateway", "Ошибка подключения к Transaction Service", err)
-		os.Exit(1)
+		utils.Fatal("некорректный адрес Transaction Service", "addr", txAddr, "err", err)
 	}
 	defer txConn.Close()
-	txClient := transactionpb.NewTransactionServiceClient(txConn)
-	utils.LogSuccess("Gateway", "Подключено к Transaction Service (%s)", txServiceAddr)
 
-	// 2. Слои Gateway
-	authMiddleware := middleware.NewAuthMiddleware(jwtSecret)
-	gatewayHandler := handlers.NewGatewayHandler(authClient, accountClient, txClient)
+	gateway := handlers.NewGatewayHandler(authConn, accountConn, txConn, requestTimeout)
+	router := handlers.NewRouter(gateway, middleware.NewAuthMiddleware(jwtSecret))
 
-	// 3. Роутер Fasthttp
-	router := func(ctx *fasthttp.RequestCtx) {
-		path := string(ctx.Path())
-		method := string(ctx.Method())
-
-		switch {
-		// Health check
-		case method == "GET" && path == "/health":
-			ctx.SetContentType("application/json")
-			ctx.SetStatusCode(fasthttp.StatusOK)
-			_ = json.NewEncoder(ctx).Encode(map[string]interface{}{
-				"status":  "OK",
-				"time":    time.Now().Format(time.RFC1123),
-				"message": "Bank Microservices API Gateway is running on port " + port,
-			})
-
-		// Публичные маршруты Auth
-		case method == "POST" && path == "/register":
-			gatewayHandler.Register(ctx)
-
-		case method == "POST" && path == "/login":
-			gatewayHandler.Login(ctx)
-
-		// Защищённые маршруты Auth
-		case method == "DELETE" && path == "/users/me":
-			authMiddleware.RequireAuth(gatewayHandler.DeleteUser)(ctx)
-
-		// Счета (Accounts)
-		case method == "POST" && path == "/accounts":
-			authMiddleware.RequireAuth(gatewayHandler.CreateAccount)(ctx)
-
-		case method == "GET" && path == "/accounts":
-			authMiddleware.RequireAuth(gatewayHandler.GetAccounts)(ctx)
-
-		case method == "GET" && len(path) > 10 && path[:10] == "/accounts/":
-			accountID := path[10:]
-			ctx.SetUserValue("id", accountID)
-			authMiddleware.RequireAuth(gatewayHandler.GetAccountByID)(ctx)
-
-		case method == "DELETE" && len(path) > 10 && path[:10] == "/accounts/":
-			accountID := path[10:]
-			ctx.SetUserValue("id", accountID)
-			authMiddleware.RequireAuth(gatewayHandler.DeleteAccount)(ctx)
-
-		// Точечные маршруты транзакций
-		case method == "POST" && path == "/transactions/transfer":
-			authMiddleware.RequireAuth(gatewayHandler.Transfer)(ctx)
-
-		case method == "POST" && path == "/transactions/payment":
-			authMiddleware.RequireAuth(gatewayHandler.Payment)(ctx)
-
-		case method == "POST" && path == "/transactions/async":
-			authMiddleware.RequireAuth(gatewayHandler.TransferAsync)(ctx)
-
-		// Универсальный маршрут транзакций (для сценариев k6!)
-		case method == "POST" && path == "/transactions":
-			authMiddleware.RequireAuth(gatewayHandler.ProcessTransaction)(ctx)
-
-		// История и получение по ID
-		case method == "GET" && path == "/transactions":
-			authMiddleware.RequireAuth(gatewayHandler.GetHistory)(ctx)
-
-		case method == "GET" && len(path) > 14 && path[:14] == "/transactions/":
-			txID := path[14:]
-			ctx.SetUserValue("id", txID)
-			authMiddleware.RequireAuth(gatewayHandler.GetTransactionByID)(ctx)
-
-		default:
-			utils.LogWarning("Router", "Неизвестный маршрут: %s %s", method, path)
-			ctx.SetStatusCode(fasthttp.StatusNotFound)
-			ctx.SetContentType("application/json")
-			_ = json.NewEncoder(ctx).Encode(map[string]string{"error": "Маршрут не найден"})
-		}
-	}
-
-	// Настроенный сервер Fasthttp с расширенным пулом соединений
 	server := &fasthttp.Server{
-		Handler:            router,
-		Name:               "Bank-API-Gateway-" + port,
-		Concurrency:        256 * 1024,
-		ReadTimeout:        15 * time.Second,
-		WriteTimeout:       15 * time.Second,
-		MaxRequestBodySize: 10 * 1024 * 1024,
-		MaxRequestsPerConn: 10000,
+		Handler:      router.Handler,
+		Name:         "bank-api-gateway",
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		// Дольше keepalive_timeout nginx (60s): простаивающее соединение закрывает nginx,
+		// а не шлюз, — иначе nginx может отправить запрос в уже закрываемое соединение.
+		IdleTimeout:        90 * time.Second,
+		MaxRequestBodySize: 1 << 20,
 	}
 
-	utils.LogSuccess("Gateway", "HTTP сервер API Gateway запущен на порту %s", port)
-	if err := server.ListenAndServe(port); err != nil {
-		utils.LogError("Gateway", "Ошибка запуска HTTP сервера", err)
+	utils.StartDebugServer(utils.Env("DEBUG_ADDR", ":6060"))
+
+	go func() {
+		if err := server.ListenAndServe(":" + port); err != nil {
+			utils.Fatal("HTTP сервер остановлен с ошибкой", "err", err)
+		}
+	}()
+	slog.Info("API Gateway запущен", "http", ":"+port, "auth", authAddr, "account", accountAddr,
+		"transaction", txAddr, "request_timeout", requestTimeout.String())
+
+	utils.WaitForShutdown()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := server.ShutdownWithContext(ctx); err != nil {
+		slog.Warn("остановка HTTP сервера", "err", err)
 	}
+	slog.Info("API Gateway остановлен")
+}
+
+func httpHealthcheck(url string) error {
+	client := http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("статус %d", resp.StatusCode)
+	}
+	return nil
 }

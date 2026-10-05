@@ -3,73 +3,104 @@ package cache
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"expvar"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 )
 
+// RedisCache — cache-aside поверх Redis. Нулевой указатель — кеш выключен:
+// любое чтение возвращает промах, запись и удаление ничего не делают.
+//
+// Балансы меняются при каждом переводе, поэтому записи живут недолго (ttl),
+// а изменяющие операции удаляют затронутые ключи сразу после COMMIT.
 type RedisCache struct {
 	client *redis.Client
+	ttl    time.Duration
 }
 
-func NewRedisCache(addr string) *RedisCache {
+var (
+	cacheHits   = expvar.NewInt("cache_hits")
+	cacheMisses = expvar.NewInt("cache_misses")
+	cacheErrors = expvar.NewInt("cache_errors")
+)
+
+func NewRedisCache(addr string, ttl time.Duration) *RedisCache {
 	client := redis.NewClient(&redis.Options{
 		Addr:         addr,
-		Password:     "",
-		DB:           0,
-		DialTimeout:  5 * time.Second,
-		ReadTimeout:  3 * time.Second,
-		WriteTimeout: 3 * time.Second,
-		PoolSize:     10,
+		DialTimeout:  2 * time.Second,
+		ReadTimeout:  500 * time.Millisecond,
+		WriteTimeout: 500 * time.Millisecond,
+		PoolSize:     50,
 		MinIdleConns: 5,
 	})
-
-	return &RedisCache{client: client}
+	return &RedisCache{client: client, ttl: ttl}
 }
 
 func (r *RedisCache) Ping(ctx context.Context) error {
+	if r == nil {
+		return nil
+	}
 	return r.client.Ping(ctx).Err()
 }
 
 func (r *RedisCache) Close() error {
+	if r == nil {
+		return nil
+	}
 	return r.client.Close()
 }
 
-func (r *RedisCache) Get(ctx context.Context, key string) (string, error) {
-	return r.client.Get(ctx, key).Result()
+// GetJSON читает значение в dest. Возвращает false при промахе; ошибка Redis — тоже промах.
+func (r *RedisCache) GetJSON(ctx context.Context, key string, dest any) (bool, error) {
+	if r == nil {
+		return false, nil
+	}
+	data, err := r.client.Get(ctx, key).Bytes()
+	if errors.Is(err, redis.Nil) {
+		cacheMisses.Add(1)
+		return false, nil
+	}
+	if err == nil {
+		err = json.Unmarshal(data, dest)
+	}
+	if err != nil {
+		cacheErrors.Add(1)
+		return false, err
+	}
+	cacheHits.Add(1)
+	return true, nil
 }
 
-func (r *RedisCache) Set(ctx context.Context, key string, value interface{}, ttl time.Duration) error {
-	return r.client.Set(ctx, key, value, ttl).Err()
-}
-
-func (r *RedisCache) SetJSON(ctx context.Context, key string, value interface{}, ttl time.Duration) error {
+func (r *RedisCache) SetJSON(ctx context.Context, key string, value any) error {
+	if r == nil {
+		return nil
+	}
 	data, err := json.Marshal(value)
 	if err != nil {
 		return err
 	}
-	return r.client.Set(ctx, key, data, ttl).Err()
-}
-
-func (r *RedisCache) GetJSON(ctx context.Context, key string, dest interface{}) error {
-	data, err := r.client.Get(ctx, key).Result()
-	if err != nil {
+	if err := r.client.Set(ctx, key, data, r.ttl).Err(); err != nil {
+		cacheErrors.Add(1)
 		return err
 	}
-	return json.Unmarshal([]byte(data), dest)
+	return nil
 }
 
 func (r *RedisCache) Delete(ctx context.Context, keys ...string) error {
-	return r.client.Del(ctx, keys...).Err()
+	if r == nil || len(keys) == 0 {
+		return nil
+	}
+	if err := r.client.Del(ctx, keys...).Err(); err != nil {
+		cacheErrors.Add(1)
+		return err
+	}
+	return nil
 }
 
-const (
-	AccountBalanceTTL = 60 * time.Minute
-	UserAccountsTTL   = 300 * time.Minute
-)
-
-func AccountBalanceKey(accountID string) string {
-	return "account:balance:" + accountID
+func AccountKey(accountID string) string {
+	return "account:" + accountID
 }
 
 func UserAccountsKey(userID string) string {

@@ -2,182 +2,161 @@ package worker
 
 import (
 	"context"
-	"fmt"
+	"errors"
+	"expvar"
+	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
-
-	"bank_proto_microservice/internal/utils"
 )
 
 var (
-	ErrQueueFull       = fmt.Errorf("очередь переполнена")
-	ErrShutdownTimeout = fmt.Errorf("таймаут остановки воркеров")
+	ErrQueueFull  = errors.New("очередь воркеров переполнена")
+	ErrPoolClosed = errors.New("пул воркеров остановлен")
 )
 
+// Job — задача пула.
 type Job struct {
-	ID      string
-	Task    func() error
+	ID string
+	// Task выполняет работу. Повторяется только если RetryOn(err) == true,
+	// поэтому повторять можно лишь идемпотентные операции.
+	Task    func(ctx context.Context) error
 	RetryOn func(error) bool
-	OnDone  func(error)
+	// OnDone вызывается один раз с итоговой ошибкой (nil — успех).
+	OnDone func(error)
 }
 
-type PoolStats struct {
-	TotalJobs     int64
-	CompletedJobs int64
-	FailedJobs    int64
-	ActiveWorkers int
-	QueuedJobs    int
+type Stats struct {
+	Submitted int64 `json:"submitted"`
+	Rejected  int64 `json:"rejected"`
+	Completed int64 `json:"completed"`
+	Failed    int64 `json:"failed"`
+	Retries   int64 `json:"retries"`
+	Queued    int   `json:"queued"`
+	Workers   int   `json:"workers"`
 }
 
 type WorkerPool struct {
 	workers    int
-	jobQueue   chan Job
-	ctx        context.Context
-	cancel     context.CancelFunc
-	wg         sync.WaitGroup
-	mu         sync.Mutex
-	stats      PoolStats
 	maxRetries int
+	jobs       chan Job
+
+	mu     sync.RWMutex // защищает closed и отправку в jobs от закрытия канала
+	closed bool
+
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+
+	submitted, rejected, completed, failed, retries atomic.Int64
 }
 
-func NewWorkerPool(workers int, queueSize int, maxRetries int) *WorkerPool {
+func NewWorkerPool(workers, queueSize, maxRetries int) *WorkerPool {
 	ctx, cancel := context.WithCancel(context.Background())
-
-	pool := &WorkerPool{
+	p := &WorkerPool{
 		workers:    workers,
-		jobQueue:   make(chan Job, queueSize),
+		maxRetries: maxRetries,
+		jobs:       make(chan Job, queueSize),
 		ctx:        ctx,
 		cancel:     cancel,
-		maxRetries: maxRetries,
-		stats: PoolStats{
-			ActiveWorkers: workers,
-		},
 	}
-
-	utils.LogSuccess("WorkerPool", "Создан пул воркеров (Воркеров: %d, Очередь: %d, Повторов: %d)", workers, queueSize, maxRetries)
-	return pool
+	if expvar.Get("worker_pool") == nil {
+		expvar.Publish("worker_pool", expvar.Func(func() any { return p.Stats() }))
+	}
+	return p
 }
 
 func (p *WorkerPool) Start() {
-	utils.LogInfo("WorkerPool", "Запуск воркеров...")
 	for i := 0; i < p.workers; i++ {
 		p.wg.Add(1)
-		go p.worker(i)
+		go p.loop()
 	}
-	utils.LogSuccess("WorkerPool", "Все воркеры успешно запущены")
 }
 
-func (p *WorkerPool) worker(id int) {
+func (p *WorkerPool) loop() {
 	defer p.wg.Done()
-	utils.LogDebug("WorkerPool", "Воркер #%d начал прослушивание очереди", id)
-
-	for {
-		select {
-		case <-p.ctx.Done():
-			utils.LogInfo("WorkerPool", "Воркер #%d завершает работу по сигналу контекста", id)
-			return
-
-		case job, ok := <-p.jobQueue:
-			if !ok {
-				utils.LogInfo("WorkerPool", "Воркер #%d: очередь закрыта, завершение", id)
-				return
-			}
-			p.updateStats(0, -1)
-			p.executeJob(id, job)
-		}
+	for job := range p.jobs {
+		p.execute(job)
 	}
 }
 
-func (p *WorkerPool) executeJob(workerID int, job Job) {
-	startTime := time.Now()
+func (p *WorkerPool) execute(job Job) {
 	var err error
-
 	for attempt := 0; attempt <= p.maxRetries; attempt++ {
 		if attempt > 0 {
-			utils.LogWarning("WorkerPool", "Воркер #%d: повторная попытка #%d для задачи %s", workerID, attempt, job.ID)
-			time.Sleep(time.Millisecond * time.Duration(100*attempt))
-		}
-
-		err = job.Task()
-		if err == nil {
-			p.updateStats(1, 0)
-			duration := time.Since(startTime)
-			utils.LogSuccess("WorkerPool", "Воркер #%d: задача %s выполнена за %v", workerID, job.ID, duration)
-			if job.OnDone != nil {
-				job.OnDone(nil)
+			p.retries.Add(1)
+			select {
+			case <-p.ctx.Done():
+			case <-time.After(time.Duration(100*attempt) * time.Millisecond):
 			}
-			return
 		}
-
-		if job.RetryOn != nil && !job.RetryOn(err) {
+		if err = job.Task(p.ctx); err == nil || p.ctx.Err() != nil || job.RetryOn == nil || !job.RetryOn(err) {
 			break
 		}
+		slog.Debug("задача будет повторена", "job", job.ID, "attempt", attempt+1, "err", err)
 	}
 
-	p.updateStats(0, 0)
-	p.mu.Lock()
-	p.stats.FailedJobs++
-	p.mu.Unlock()
-
-	duration := time.Since(startTime)
-	utils.LogError("WorkerPool", fmt.Sprintf("Воркер #%d: задача %s провалилась после %v", workerID, job.ID, duration), err)
-
+	if err == nil {
+		p.completed.Add(1)
+	} else {
+		p.failed.Add(1)
+	}
 	if job.OnDone != nil {
 		job.OnDone(err)
 	}
 }
 
+// Submit ставит задачу в очередь без ожидания: при переполнении сразу возвращает ErrQueueFull.
 func (p *WorkerPool) Submit(job Job) error {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.closed {
+		return ErrPoolClosed
+	}
 	select {
-	case <-p.ctx.Done():
-		return context.Canceled
-	case p.jobQueue <- job:
-		p.updateStats(0, 1)
-		utils.LogDebug("WorkerPool", "Задача %s добавлена в очередь (в очереди: %d)", job.ID, p.GetStats().QueuedJobs)
+	case p.jobs <- job:
+		p.submitted.Add(1)
 		return nil
 	default:
-		utils.LogWarning("WorkerPool", "Очередь переполнена! Задача %s отклонена", job.ID)
+		p.rejected.Add(1)
 		return ErrQueueFull
 	}
 }
 
+// Shutdown перестаёт принимать задачи и ждёт, пока воркеры доделают очередь.
+// По истечении timeout отменяет контекст выполняющихся задач.
 func (p *WorkerPool) Shutdown(timeout time.Duration) error {
-	utils.LogInfo("WorkerPool", "Остановка пула воркеров...")
-	close(p.jobQueue)
+	p.mu.Lock()
+	if !p.closed {
+		p.closed = true
+		close(p.jobs)
+	}
+	p.mu.Unlock()
 
 	done := make(chan struct{})
 	go func() {
 		p.wg.Wait()
 		close(done)
 	}()
-
 	select {
 	case <-done:
-		utils.LogSuccess("WorkerPool", "Все воркеры успешно завершили работу")
+		p.cancel()
 		return nil
 	case <-time.After(timeout):
 		p.cancel()
-		utils.LogWarning("WorkerPool", "Превышен таймаут остановки, принудительное завершение")
-		return ErrShutdownTimeout
+		<-done
+		return errors.New("таймаут остановки пула: выполнение задач прервано")
 	}
 }
 
-func (p *WorkerPool) GetStats() PoolStats {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	stats := p.stats
-	stats.QueuedJobs = len(p.jobQueue)
-	return stats
-}
-
-func (p *WorkerPool) updateStats(completed int64, queued int) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.stats.TotalJobs++
-	p.stats.CompletedJobs += completed
-	p.stats.QueuedJobs += queued
-}
-
-func GetCurrentTimeMs() int64 {
-	return time.Now().UnixNano() / int64(time.Millisecond)
+func (p *WorkerPool) Stats() Stats {
+	return Stats{
+		Submitted: p.submitted.Load(),
+		Rejected:  p.rejected.Load(),
+		Completed: p.completed.Load(),
+		Failed:    p.failed.Load(),
+		Retries:   p.retries.Load(),
+		Queued:    len(p.jobs),
+		Workers:   p.workers,
+	}
 }

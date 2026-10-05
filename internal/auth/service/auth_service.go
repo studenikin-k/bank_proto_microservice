@@ -3,46 +3,44 @@ package service
 import (
 	"time"
 
-	"bank_proto_microservice/internal/utils"
-
 	"github.com/golang-jwt/jwt/v4"
 	"golang.org/x/crypto/bcrypt"
 )
 
 type AuthService struct {
-	jwtSecret     string
+	jwtSecret     []byte
 	jwtExpiration time.Duration
+	bcryptCost    int
+	// Хеш-заглушка для входа несуществующего пользователя: bcrypt выполняется всегда,
+	// поэтому по времени ответа нельзя узнать, существует ли имя.
+	dummyHash []byte
 }
 
-func NewAuthService(secret string, expiration time.Duration) *AuthService {
-	utils.LogSuccess("AuthService", "Инициализирован сервис аутентификации (TTL: %v)", expiration)
+func NewAuthService(secret string, expiration time.Duration, bcryptCost int) *AuthService {
+	dummy, _ := bcrypt.GenerateFromPassword([]byte("dummy-password"), bcryptCost)
 	return &AuthService{
-		jwtSecret:     secret,
+		jwtSecret:     []byte(secret),
 		jwtExpiration: expiration,
+		bcryptCost:    bcryptCost,
+		dummyHash:     dummy,
 	}
 }
 
 func (s *AuthService) HashPassword(password string) (string, error) {
-	utils.LogDebug("AuthService", "Хеширование пароля...")
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	if err != nil {
-		utils.LogError("AuthService", "Ошибка хеширования пароля", err)
-		return "", err
-	}
-	utils.LogSuccess("AuthService", "Пароль успешно захеширован")
-	return string(hashedPassword), nil
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), s.bcryptCost)
+	return string(hash), err
 }
 
-func (s *AuthService) CheckPasswordHash(password, hash string) error {
-	utils.LogDebug("AuthService", "Проверка пароля...")
-	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
-	if err != nil {
-		utils.LogWarning("AuthService", "Неверный пароль")
-		return err
-	}
-	utils.LogSuccess("AuthService", "Пароль верный")
-	return nil
+func (s *AuthService) CheckPassword(password, hash string) bool {
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
 }
+
+// SimulatePasswordCheck тратит столько же времени, сколько настоящая проверка пароля.
+func (s *AuthService) SimulatePasswordCheck(password string) {
+	_ = bcrypt.CompareHashAndPassword(s.dummyHash, []byte(password))
+}
+
+func (s *AuthService) ExpiresIn() time.Duration { return s.jwtExpiration }
 
 type Claims struct {
 	UserID string `json:"user_id"`
@@ -50,22 +48,13 @@ type Claims struct {
 }
 
 func (s *AuthService) GenerateToken(userID string) (string, error) {
-	utils.LogDebug("AuthService", "Генерация JWT токена для пользователя: %s", userID)
-
+	now := time.Now()
 	claims := &Claims{
 		UserID: userID,
 		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(s.jwtExpiration)),
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			ExpiresAt: jwt.NewNumericDate(now.Add(s.jwtExpiration)),
+			IssuedAt:  jwt.NewNumericDate(now),
 		},
 	}
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	signedToken, err := token.SignedString([]byte(s.jwtSecret))
-	if err != nil {
-		utils.LogError("AuthService", "Ошибка подписи токена", err)
-		return "", err
-	}
-
-	utils.LogSuccess("AuthService", "JWT токен создан для пользователя: %s", userID)
-	return signedToken, nil
+	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(s.jwtSecret)
 }

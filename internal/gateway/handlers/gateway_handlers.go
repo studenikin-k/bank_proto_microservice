@@ -1,184 +1,217 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
+	"os"
+	"strconv"
 	"time"
 
-	"bank_proto_microservice/internal/utils"
+	"bank_proto_microservice/internal/money"
 	accountpb "bank_proto_microservice/proto/account"
 	authpb "bank_proto_microservice/proto/auth"
 	transactionpb "bank_proto_microservice/proto/transaction"
 
 	"github.com/valyala/fasthttp"
-	"google.golang.org/grpc/status"
+	"google.golang.org/grpc"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
+
+// Downstream — gRPC-соединение с сервисом (для readiness-проверки).
+type Downstream struct {
+	Name string
+	Conn *grpc.ClientConn
+}
 
 type GatewayHandler struct {
 	authClient        authpb.AuthServiceClient
 	accountClient     accountpb.AccountServiceClient
 	transactionClient transactionpb.TransactionServiceClient
+	downstreams       []Downstream
+	timeout           time.Duration // дедлайн каждого вызова gRPC-сервиса
+	instance          string
 }
 
 func NewGatewayHandler(
-	authClient authpb.AuthServiceClient,
-	accountClient accountpb.AccountServiceClient,
-	transactionClient transactionpb.TransactionServiceClient,
+	authConn, accountConn, txConn *grpc.ClientConn,
+	timeout time.Duration,
 ) *GatewayHandler {
-	utils.LogSuccess("GatewayHandler", "Инициализированы HTTP-обработчики шлюза")
+	instance, _ := os.Hostname()
 	return &GatewayHandler{
-		authClient:        authClient,
-		accountClient:     accountClient,
-		transactionClient: transactionClient,
+		authClient:        authpb.NewAuthServiceClient(authConn),
+		accountClient:     accountpb.NewAccountServiceClient(accountConn),
+		transactionClient: transactionpb.NewTransactionServiceClient(txConn),
+		downstreams: []Downstream{
+			{"auth", authConn}, {"account", accountConn}, {"transaction", txConn},
+		},
+		timeout:  timeout,
+		instance: instance,
 	}
+}
+
+// call создаёт контекст с дедлайном для вызова сервиса. fasthttp.RequestCtx
+// дедлайна не несёт, поэтому без этого зависший сервис держал бы запрос бесконечно.
+func (h *GatewayHandler) call() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), h.timeout)
+}
+
+func userID(ctx *fasthttp.RequestCtx) string {
+	id, _ := ctx.UserValue("user_id").(string)
+	return id
+}
+
+func pathID(ctx *fasthttp.RequestCtx) string {
+	id, _ := ctx.UserValue("id").(string)
+	return id
+}
+
+func decode(ctx *fasthttp.RequestCtx, dst any) bool {
+	if err := json.Unmarshal(ctx.PostBody(), dst); err != nil {
+		writeBadRequest(ctx, "неверный формат JSON: "+err.Error())
+		return false
+	}
+	return true
+}
+
+// ==================== HEALTH ====================
+
+func (h *GatewayHandler) Health(ctx *fasthttp.RequestCtx) {
+	writeJSON(ctx, fasthttp.StatusOK, map[string]string{
+		"status":   "OK",
+		"time":     time.Now().Format(time.RFC3339),
+		"message":  "Bank Microservices API Gateway is running",
+		"instance": h.instance,
+	})
+}
+
+// Ready проверяет, что все gRPC-сервисы отвечают на health-check.
+func (h *GatewayHandler) Ready(ctx *fasthttp.RequestCtx) {
+	c, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	result := map[string]string{}
+	ready := true
+	for _, d := range h.downstreams {
+		resp, err := healthpb.NewHealthClient(d.Conn).Check(c, &healthpb.HealthCheckRequest{})
+		switch {
+		case err != nil:
+			result[d.Name], ready = err.Error(), false
+		case resp.GetStatus() != healthpb.HealthCheckResponse_SERVING:
+			result[d.Name], ready = resp.GetStatus().String(), false
+		default:
+			result[d.Name] = "SERVING"
+		}
+	}
+	code := fasthttp.StatusOK
+	if !ready {
+		code = fasthttp.StatusServiceUnavailable
+	}
+	writeJSON(ctx, code, map[string]any{"ready": ready, "services": result, "instance": h.instance})
 }
 
 // ==================== AUTH ====================
 
+type credentials struct {
+	Name     string `json:"name"`
+	Password string `json:"password"`
+}
+
 func (h *GatewayHandler) Register(ctx *fasthttp.RequestCtx) {
-	start := time.Now()
-	utils.LogRequest("POST", "/register", "anonymous")
-
-	var req struct {
-		Name     string `json:"name"`
-		Password string `json:"password"`
-	}
-	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
-		ctx.SetStatusCode(fasthttp.StatusBadRequest)
-		_ = json.NewEncoder(ctx).Encode(map[string]string{"error": "Неверный формат данных"})
+	var req credentials
+	if !decode(ctx, &req) {
 		return
 	}
-
-	resp, err := h.authClient.Register(ctx, &authpb.RegisterRequest{
-		Name:     req.Name,
-		Password: req.Password,
-	})
+	c, cancel := h.call()
+	defer cancel()
+	resp, err := h.authClient.Register(c, &authpb.RegisterRequest{Name: req.Name, Password: req.Password})
 	if err != nil {
-		st, _ := status.FromError(err)
-		ctx.SetStatusCode(fasthttp.StatusConflict)
-		_ = json.NewEncoder(ctx).Encode(map[string]string{"error": st.Message()})
+		writeError(ctx, err)
 		return
 	}
-
-	ctx.SetStatusCode(fasthttp.StatusCreated)
-	ctx.SetContentType("application/json")
-	_ = json.NewEncoder(ctx).Encode(map[string]interface{}{
+	writeJSON(ctx, fasthttp.StatusCreated, map[string]string{
 		"message":    "Пользователь успешно зарегистрирован",
 		"user_id":    resp.GetUserId(),
 		"name":       resp.GetName(),
 		"created_at": resp.GetCreatedAt(),
 	})
-	utils.LogResponse("/register", fasthttp.StatusCreated, time.Since(start))
 }
 
 func (h *GatewayHandler) Login(ctx *fasthttp.RequestCtx) {
-	start := time.Now()
-	utils.LogRequest("POST", "/login", "anonymous")
-
-	var req struct {
-		Name     string `json:"name"`
-		Password string `json:"password"`
-	}
-	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
-		ctx.SetStatusCode(fasthttp.StatusBadRequest)
-		_ = json.NewEncoder(ctx).Encode(map[string]string{"error": "Неверный формат данных"})
+	var req credentials
+	if !decode(ctx, &req) {
 		return
 	}
-
-	resp, err := h.authClient.Login(ctx, &authpb.LoginRequest{
-		Name:     req.Name,
-		Password: req.Password,
-	})
+	c, cancel := h.call()
+	defer cancel()
+	resp, err := h.authClient.Login(c, &authpb.LoginRequest{Name: req.Name, Password: req.Password})
 	if err != nil {
-		st, _ := status.FromError(err)
-		ctx.SetStatusCode(fasthttp.StatusUnauthorized)
-		_ = json.NewEncoder(ctx).Encode(map[string]string{"error": st.Message()})
+		writeError(ctx, err)
 		return
 	}
-
-	ctx.SetStatusCode(fasthttp.StatusOK)
-	ctx.SetContentType("application/json")
-	_ = json.NewEncoder(ctx).Encode(map[string]interface{}{
+	writeJSON(ctx, fasthttp.StatusOK, map[string]string{
 		"message":    "Вход выполнен успешно",
 		"token":      resp.GetToken(),
 		"user_id":    resp.GetUserId(),
 		"name":       resp.GetName(),
 		"expires_in": resp.GetExpiresIn(),
 	})
-	utils.LogResponse("/login", fasthttp.StatusOK, time.Since(start))
 }
 
 func (h *GatewayHandler) DeleteUser(ctx *fasthttp.RequestCtx) {
-	userID := ctx.UserValue("user_id").(string)
-	utils.LogRequest("DELETE", "/users/me", userID)
-
-	resp, err := h.authClient.DeleteUser(ctx, &authpb.DeleteUserRequest{UserId: userID})
+	c, cancel := h.call()
+	defer cancel()
+	resp, err := h.authClient.DeleteUser(c, &authpb.DeleteUserRequest{UserId: userID(ctx)})
 	if err != nil {
-		st, _ := status.FromError(err)
-		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
-		_ = json.NewEncoder(ctx).Encode(map[string]string{"error": st.Message()})
+		writeError(ctx, err)
 		return
 	}
-
-	ctx.SetStatusCode(fasthttp.StatusOK)
-	ctx.SetContentType("application/json")
-	_ = json.NewEncoder(ctx).Encode(map[string]interface{}{
-		"message": resp.GetMessage(),
-		"user_id": userID,
-	})
+	writeJSON(ctx, fasthttp.StatusOK, map[string]string{"message": resp.GetMessage(), "user_id": userID(ctx)})
 }
 
 // ==================== ACCOUNTS ====================
 
-func (h *GatewayHandler) CreateAccount(ctx *fasthttp.RequestCtx) {
-	userID := ctx.UserValue("user_id").(string)
-	utils.LogRequest("POST", "/accounts", userID)
+type accountJSON struct {
+	ID        string       `json:"id"`
+	AccountID string       `json:"account_id"` // дублирует id: его читают k6-сценарии
+	Balance   money.Amount `json:"balance"`
+	Status    string       `json:"status"`
+	CreatedAt string       `json:"created_at"`
+}
 
-	resp, err := h.accountClient.CreateAccount(ctx, &accountpb.CreateAccountRequest{UserId: userID})
+func toAccountJSON(a *accountpb.AccountResponse) accountJSON {
+	return accountJSON{
+		ID:        a.GetId(),
+		AccountID: a.GetId(),
+		Balance:   money.Amount(a.GetBalance()),
+		Status:    a.GetStatus(),
+		CreatedAt: a.GetCreatedAt(),
+	}
+}
+
+func (h *GatewayHandler) CreateAccount(ctx *fasthttp.RequestCtx) {
+	c, cancel := h.call()
+	defer cancel()
+	resp, err := h.accountClient.CreateAccount(c, &accountpb.CreateAccountRequest{UserId: userID(ctx)})
 	if err != nil {
-		st, _ := status.FromError(err)
-		ctx.SetStatusCode(fasthttp.StatusForbidden)
-		_ = json.NewEncoder(ctx).Encode(map[string]string{"error": st.Message()})
+		writeError(ctx, err)
 		return
 	}
-
-	ctx.SetStatusCode(fasthttp.StatusCreated)
-	ctx.SetContentType("application/json")
-	// ВАЖНО: отдаем и "id", и "account_id" для 100% совместимости с k6 тестами!
-	_ = json.NewEncoder(ctx).Encode(map[string]interface{}{
-		"id":         resp.GetId(),
-		"account_id": resp.GetId(),
-		"balance":    resp.GetBalance(),
-		"status":     resp.GetStatus(),
-		"created_at": resp.GetCreatedAt(),
-	})
+	writeJSON(ctx, fasthttp.StatusCreated, toAccountJSON(resp))
 }
 
 func (h *GatewayHandler) GetAccounts(ctx *fasthttp.RequestCtx) {
-	userID := ctx.UserValue("user_id").(string)
-	utils.LogRequest("GET", "/accounts", userID)
-
-	resp, err := h.accountClient.GetUserAccounts(ctx, &accountpb.GetUserAccountsRequest{UserId: userID})
+	c, cancel := h.call()
+	defer cancel()
+	resp, err := h.accountClient.GetUserAccounts(c, &accountpb.GetUserAccountsRequest{UserId: userID(ctx)})
 	if err != nil {
-		st, _ := status.FromError(err)
-		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
-		_ = json.NewEncoder(ctx).Encode(map[string]string{"error": st.Message()})
+		writeError(ctx, err)
 		return
 	}
-
-	var accounts []map[string]interface{}
+	accounts := make([]accountJSON, 0, len(resp.GetAccounts()))
 	for _, a := range resp.GetAccounts() {
-		accounts = append(accounts, map[string]interface{}{
-			"id":         a.GetId(),
-			"account_id": a.GetId(),
-			"balance":    a.GetBalance(),
-			"status":     a.GetStatus(),
-			"created_at": a.GetCreatedAt(),
-		})
+		accounts = append(accounts, toAccountJSON(a))
 	}
-
-	ctx.SetStatusCode(fasthttp.StatusOK)
-	ctx.SetContentType("application/json")
-	_ = json.NewEncoder(ctx).Encode(map[string]interface{}{
+	writeJSON(ctx, fasthttp.StatusOK, map[string]any{
 		"accounts":        accounts,
 		"total":           resp.GetTotal(),
 		"active_count":    resp.GetActiveCount(),
@@ -189,210 +222,158 @@ func (h *GatewayHandler) GetAccounts(ctx *fasthttp.RequestCtx) {
 }
 
 func (h *GatewayHandler) GetAccountByID(ctx *fasthttp.RequestCtx) {
-	userID := ctx.UserValue("user_id").(string)
-	accountID := ctx.UserValue("id").(string)
-	utils.LogRequest("GET", "/accounts/"+accountID, userID)
-
-	resp, err := h.accountClient.GetAccount(ctx, &accountpb.GetAccountRequest{
-		AccountId: accountID,
-		UserId:    userID,
-	})
+	c, cancel := h.call()
+	defer cancel()
+	resp, err := h.accountClient.GetAccount(c, &accountpb.GetAccountRequest{AccountId: pathID(ctx), UserId: userID(ctx)})
 	if err != nil {
-		st, _ := status.FromError(err)
-		ctx.SetStatusCode(fasthttp.StatusNotFound)
-		_ = json.NewEncoder(ctx).Encode(map[string]string{"error": st.Message()})
+		writeError(ctx, err)
 		return
 	}
-
-	ctx.SetStatusCode(fasthttp.StatusOK)
-	ctx.SetContentType("application/json")
-	_ = json.NewEncoder(ctx).Encode(map[string]interface{}{
-		"id":         resp.GetId(),
-		"account_id": resp.GetId(),
-		"balance":    resp.GetBalance(),
-		"status":     resp.GetStatus(),
-		"created_at": resp.GetCreatedAt(),
-	})
+	writeJSON(ctx, fasthttp.StatusOK, toAccountJSON(resp))
 }
 
 func (h *GatewayHandler) DeleteAccount(ctx *fasthttp.RequestCtx) {
-	userID := ctx.UserValue("user_id").(string)
-	accountID := ctx.UserValue("id").(string)
-	utils.LogRequest("DELETE", "/accounts/"+accountID, userID)
-
-	resp, err := h.accountClient.DeleteAccount(ctx, &accountpb.DeleteAccountRequest{
-		AccountId: accountID,
-		UserId:    userID,
-	})
+	c, cancel := h.call()
+	defer cancel()
+	resp, err := h.accountClient.DeleteAccount(c, &accountpb.DeleteAccountRequest{AccountId: pathID(ctx), UserId: userID(ctx)})
 	if err != nil {
-		st, _ := status.FromError(err)
-		ctx.SetStatusCode(fasthttp.StatusBadRequest)
-		_ = json.NewEncoder(ctx).Encode(map[string]string{"error": st.Message()})
+		writeError(ctx, err)
 		return
 	}
-
-	ctx.SetStatusCode(fasthttp.StatusOK)
-	ctx.SetContentType("application/json")
-	_ = json.NewEncoder(ctx).Encode(map[string]string{
-		"message":    resp.GetMessage(),
-		"account_id": resp.GetAccountId(),
-	})
+	writeJSON(ctx, fasthttp.StatusOK, map[string]string{"message": resp.GetMessage(), "account_id": resp.GetAccountId()})
 }
 
 // ==================== TRANSACTIONS ====================
 
-// ProcessTransaction — универсальный обработчик для POST /transactions из тестов k6
-func (h *GatewayHandler) ProcessTransaction(ctx *fasthttp.RequestCtx) {
-	userID := ctx.UserValue("user_id").(string)
-	utils.LogRequest("POST", "/transactions", userID)
+type transactionJSON struct {
+	ID            string       `json:"id"`
+	Type          string       `json:"type"`
+	FromAccountID string       `json:"from_account_id"`
+	ToAccountID   string       `json:"to_account_id"`
+	Amount        money.Amount `json:"amount"`
+	FeePercent    int32        `json:"fee_percent"`
+	FeeAmount     money.Amount `json:"fee_amount"`
+	TotalDebit    money.Amount `json:"total_debit"`
+	Status        string       `json:"status"`
+	FailureReason string       `json:"failure_reason,omitempty"`
+	CreatedAt     string       `json:"created_at"`
+	UpdatedAt     string       `json:"updated_at"`
+}
 
-	var req struct {
-		Type          string  `json:"type"` // "transfer" или "payment"
-		FromAccountID string  `json:"from_account_id"`
-		ToAccountID   string  `json:"to_account_id"`
-		Amount        float64 `json:"amount"`
+func toTransactionJSON(t *transactionpb.TransactionResponse) transactionJSON {
+	return transactionJSON{
+		ID:            t.GetId(),
+		Type:          t.GetType(),
+		FromAccountID: t.GetFromAccountId(),
+		ToAccountID:   t.GetToAccountId(),
+		Amount:        money.Amount(t.GetAmount()),
+		FeePercent:    t.GetFeePercent(),
+		FeeAmount:     money.Amount(t.GetFeeAmount()),
+		TotalDebit:    money.Amount(t.GetTotalDebit()),
+		Status:        t.GetStatus(),
+		FailureReason: t.GetFailureReason(),
+		CreatedAt:     t.GetCreatedAt(),
+		UpdatedAt:     t.GetUpdatedAt(),
 	}
-	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
-		ctx.SetStatusCode(fasthttp.StatusBadRequest)
-		_ = json.NewEncoder(ctx).Encode(map[string]string{"error": "invalid request body"})
-		return
-	}
+}
 
-	if req.Type == "payment" {
-		resp, err := h.transactionClient.Payment(ctx, &transactionpb.PaymentRequest{
-			UserId:        userID,
-			FromAccountId: req.FromAccountID,
-			ToAccountId:   req.ToAccountID,
-			Amount:        req.Amount,
-		})
-		if err != nil {
-			st, _ := status.FromError(err)
-			ctx.SetStatusCode(fasthttp.StatusBadRequest)
-			_ = json.NewEncoder(ctx).Encode(map[string]string{"error": st.Message()})
+type transactionRequest struct {
+	Type          string       `json:"type"` // "transfer" (по умолчанию) или "payment"
+	FromAccountID string       `json:"from_account_id"`
+	ToAccountID   string       `json:"to_account_id"`
+	Amount        money.Amount `json:"amount"`
+}
+
+// CreateTransaction возвращает обработчик перевода. forcedType задаёт тип операции
+// для маршрутов /transactions/transfer и /transactions/payment; для POST /transactions
+// тип берётся из тела запроса. Заголовок Idempotency-Key делает повтор запроса безопасным.
+func (h *GatewayHandler) CreateTransaction(forcedType string, async bool) fasthttp.RequestHandler {
+	return func(ctx *fasthttp.RequestCtx) {
+		var req transactionRequest
+		if !decode(ctx, &req) {
 			return
 		}
-		ctx.SetStatusCode(fasthttp.StatusCreated)
-		ctx.SetContentType("application/json")
-		_ = json.NewEncoder(ctx).Encode(map[string]interface{}{
-			"message":     "payment successful",
-			"transaction": resp,
+		if forcedType != "" {
+			req.Type = forcedType
+		}
+		grpcReq := &transactionpb.CreateTransactionRequest{
+			UserId:         userID(ctx),
+			IdempotencyKey: string(ctx.Request.Header.Peek("Idempotency-Key")),
+			Type:           req.Type,
+			FromAccountId:  req.FromAccountID,
+			ToAccountId:    req.ToAccountID,
+			Amount:         req.Amount.Kopecks(),
+		}
+
+		c, cancel := h.call()
+		defer cancel()
+		var resp *transactionpb.TransactionResponse
+		var err error
+		if async {
+			resp, err = h.transactionClient.CreateTransactionAsync(c, grpcReq)
+		} else {
+			resp, err = h.transactionClient.CreateTransaction(c, grpcReq)
+		}
+		if err != nil {
+			writeError(ctx, err)
+			return
+		}
+		if resp.GetIdempotentReplay() {
+			ctx.Response.Header.Set("Idempotent-Replayed", "true")
+		}
+
+		if async {
+			writeJSON(ctx, fasthttp.StatusAccepted, map[string]any{
+				"status":         "accepted",
+				"message":        "Перевод принят в обработку, итог — GET /transactions/" + resp.GetId(),
+				"transaction_id": resp.GetId(),
+				"transaction":    toTransactionJSON(resp),
+			})
+			return
+		}
+		writeJSON(ctx, fasthttp.StatusCreated, map[string]any{
+			"message":     resp.GetType() + " successful",
+			"transaction": toTransactionJSON(resp),
 		})
-		return
 	}
-
-	// По умолчанию transfer
-	resp, err := h.transactionClient.Transfer(ctx, &transactionpb.TransferRequest{
-		UserId:        userID,
-		FromAccountId: req.FromAccountID,
-		ToAccountId:   req.ToAccountID,
-		Amount:        req.Amount,
-	})
-	if err != nil {
-		st, _ := status.FromError(err)
-		ctx.SetStatusCode(fasthttp.StatusBadRequest)
-		_ = json.NewEncoder(ctx).Encode(map[string]string{"error": st.Message()})
-		return
-	}
-
-	ctx.SetStatusCode(fasthttp.StatusCreated)
-	ctx.SetContentType("application/json")
-	_ = json.NewEncoder(ctx).Encode(map[string]interface{}{
-		"message":     "transfer successful",
-		"transaction": resp,
-	})
-}
-
-func (h *GatewayHandler) Transfer(ctx *fasthttp.RequestCtx) {
-	h.ProcessTransaction(ctx)
-}
-
-func (h *GatewayHandler) Payment(ctx *fasthttp.RequestCtx) {
-	h.ProcessTransaction(ctx)
-}
-
-func (h *GatewayHandler) TransferAsync(ctx *fasthttp.RequestCtx) {
-	userID := ctx.UserValue("user_id").(string)
-	utils.LogRequest("POST", "/transactions/async", userID)
-
-	var req struct {
-		FromAccountID string  `json:"from_account_id"`
-		ToAccountID   string  `json:"to_account_id"`
-		Amount        float64 `json:"amount"`
-	}
-	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
-		ctx.SetStatusCode(fasthttp.StatusBadRequest)
-		_ = json.NewEncoder(ctx).Encode(map[string]string{"error": "invalid request body"})
-		return
-	}
-
-	resp, err := h.transactionClient.TransferAsync(ctx, &transactionpb.TransferRequest{
-		UserId:        userID,
-		FromAccountId: req.FromAccountID,
-		ToAccountId:   req.ToAccountID,
-		Amount:        req.Amount,
-	})
-	if err != nil {
-		st, _ := status.FromError(err)
-		ctx.SetStatusCode(fasthttp.StatusServiceUnavailable)
-		_ = json.NewEncoder(ctx).Encode(map[string]string{"error": st.Message()})
-		return
-	}
-
-	ctx.SetStatusCode(fasthttp.StatusAccepted)
-	ctx.SetContentType("application/json")
-	_ = json.NewEncoder(ctx).Encode(map[string]string{
-		"status":  resp.GetStatus(),
-		"message": resp.GetMessage(),
-	})
 }
 
 func (h *GatewayHandler) GetHistory(ctx *fasthttp.RequestCtx) {
-	userID := ctx.UserValue("user_id").(string)
-	utils.LogRequest("GET", "/transactions", userID)
-
-	accountIDBytes := ctx.QueryArgs().Peek("account_id")
-	var accountIDPtr *string
-	if len(accountIDBytes) > 0 {
-		str := string(accountIDBytes)
-		accountIDPtr = &str
+	req := &transactionpb.GetHistoryRequest{UserId: userID(ctx)}
+	if accountID := ctx.QueryArgs().Peek("account_id"); len(accountID) > 0 {
+		s := string(accountID)
+		req.AccountId = &s
+	}
+	if limit := ctx.QueryArgs().Peek("limit"); len(limit) > 0 {
+		n, err := strconv.Atoi(string(limit))
+		if err != nil || n <= 0 {
+			writeBadRequest(ctx, "limit должен быть положительным целым числом")
+			return
+		}
+		req.Limit = int32(min(n, 1000))
 	}
 
-	resp, err := h.transactionClient.GetHistory(ctx, &transactionpb.GetHistoryRequest{
-		UserId:    userID,
-		AccountId: accountIDPtr,
-	})
+	c, cancel := h.call()
+	defer cancel()
+	resp, err := h.transactionClient.GetHistory(c, req)
 	if err != nil {
-		st, _ := status.FromError(err)
-		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
-		_ = json.NewEncoder(ctx).Encode(map[string]string{"error": st.Message()})
+		writeError(ctx, err)
 		return
 	}
-
-	ctx.SetStatusCode(fasthttp.StatusOK)
-	ctx.SetContentType("application/json")
-	_ = json.NewEncoder(ctx).Encode(map[string]interface{}{
-		"transactions": resp.GetTransactions(),
-		"total":        resp.GetTotal(),
-	})
+	list := make([]transactionJSON, 0, len(resp.GetTransactions()))
+	for _, t := range resp.GetTransactions() {
+		list = append(list, toTransactionJSON(t))
+	}
+	writeJSON(ctx, fasthttp.StatusOK, map[string]any{"transactions": list, "total": resp.GetTotal()})
 }
 
 func (h *GatewayHandler) GetTransactionByID(ctx *fasthttp.RequestCtx) {
-	userID := ctx.UserValue("user_id").(string)
-	txID := ctx.UserValue("id").(string)
-	utils.LogRequest("GET", "/transactions/"+txID, userID)
-
-	resp, err := h.transactionClient.GetByID(ctx, &transactionpb.GetByIDRequest{
-		UserId:        userID,
-		TransactionId: txID,
-	})
+	c, cancel := h.call()
+	defer cancel()
+	resp, err := h.transactionClient.GetByID(c, &transactionpb.GetByIDRequest{UserId: userID(ctx), TransactionId: pathID(ctx)})
 	if err != nil {
-		st, _ := status.FromError(err)
-		ctx.SetStatusCode(fasthttp.StatusNotFound)
-		_ = json.NewEncoder(ctx).Encode(map[string]string{"error": st.Message()})
+		writeError(ctx, err)
 		return
 	}
-
-	ctx.SetStatusCode(fasthttp.StatusOK)
-	ctx.SetContentType("application/json")
-	_ = json.NewEncoder(ctx).Encode(resp)
+	writeJSON(ctx, fasthttp.StatusOK, toTransactionJSON(resp))
 }

@@ -21,6 +21,55 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type ResolveTransferResponse_Outcome int32
+
+const (
+	ResolveTransferResponse_OUTCOME_UNSPECIFIED ResolveTransferResponse_Outcome = 0
+	ResolveTransferResponse_APPLIED             ResolveTransferResponse_Outcome = 1 // деньги переведены
+	ResolveTransferResponse_ABORTED             ResolveTransferResponse_Outcome = 2 // перевод не применён и уже не будет применён
+)
+
+// Enum value maps for ResolveTransferResponse_Outcome.
+var (
+	ResolveTransferResponse_Outcome_name = map[int32]string{
+		0: "OUTCOME_UNSPECIFIED",
+		1: "APPLIED",
+		2: "ABORTED",
+	}
+	ResolveTransferResponse_Outcome_value = map[string]int32{
+		"OUTCOME_UNSPECIFIED": 0,
+		"APPLIED":             1,
+		"ABORTED":             2,
+	}
+)
+
+func (x ResolveTransferResponse_Outcome) Enum() *ResolveTransferResponse_Outcome {
+	p := new(ResolveTransferResponse_Outcome)
+	*p = x
+	return p
+}
+
+func (x ResolveTransferResponse_Outcome) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ResolveTransferResponse_Outcome) Descriptor() protoreflect.EnumDescriptor {
+	return file_account_account_proto_enumTypes[0].Descriptor()
+}
+
+func (ResolveTransferResponse_Outcome) Type() protoreflect.EnumType {
+	return &file_account_account_proto_enumTypes[0]
+}
+
+func (x ResolveTransferResponse_Outcome) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ResolveTransferResponse_Outcome.Descriptor instead.
+func (ResolveTransferResponse_Outcome) EnumDescriptor() ([]byte, []int) {
+	return file_account_account_proto_rawDescGZIP(), []int{10, 0}
+}
+
 type CreateAccountRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	UserId        string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
@@ -277,7 +326,7 @@ type AccountResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	UserId        string                 `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
-	Balance       float64                `protobuf:"fixed64,3,opt,name=balance,proto3" json:"balance,omitempty"`
+	Balance       int64                  `protobuf:"varint,3,opt,name=balance,proto3" json:"balance,omitempty"` // в копейках
 	Status        string                 `protobuf:"bytes,4,opt,name=status,proto3" json:"status,omitempty"`
 	CreatedAt     string                 `protobuf:"bytes,5,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -328,7 +377,7 @@ func (x *AccountResponse) GetUserId() string {
 	return ""
 }
 
-func (x *AccountResponse) GetBalance() float64 {
+func (x *AccountResponse) GetBalance() int64 {
 	if x != nil {
 		return x.Balance
 	}
@@ -433,32 +482,32 @@ func (x *AccountListResponse) GetCanCreateMore() bool {
 	return false
 }
 
-type UpdateBalanceRequest struct {
+type ApplyTransferRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	FromAccountId string                 `protobuf:"bytes,1,opt,name=from_account_id,json=fromAccountId,proto3" json:"from_account_id,omitempty"`
-	ToAccountId   string                 `protobuf:"bytes,2,opt,name=to_account_id,json=toAccountId,proto3" json:"to_account_id,omitempty"`
-	Amount        float64                `protobuf:"fixed64,3,opt,name=amount,proto3" json:"amount,omitempty"`
-	FeeAmount     float64                `protobuf:"fixed64,4,opt,name=fee_amount,json=feeAmount,proto3" json:"fee_amount,omitempty"`
-	TotalDebit    float64                `protobuf:"fixed64,5,opt,name=total_debit,json=totalDebit,proto3" json:"total_debit,omitempty"`
-	FeeAccountId  string                 `protobuf:"bytes,6,opt,name=fee_account_id,json=feeAccountId,proto3" json:"fee_account_id,omitempty"`
+	TransferId    string                 `protobuf:"bytes,1,opt,name=transfer_id,json=transferId,proto3" json:"transfer_id,omitempty"` // UUID записи в Transaction Service, ключ идемпотентности
+	UserId        string                 `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`             // инициатор; должен владеть счётом списания
+	FromAccountId string                 `protobuf:"bytes,3,opt,name=from_account_id,json=fromAccountId,proto3" json:"from_account_id,omitempty"`
+	ToAccountId   string                 `protobuf:"bytes,4,opt,name=to_account_id,json=toAccountId,proto3" json:"to_account_id,omitempty"`
+	Amount        int64                  `protobuf:"varint,5,opt,name=amount,proto3" json:"amount,omitempty"` // зачисляется получателю
+	Fee           int64                  `protobuf:"varint,6,opt,name=fee,proto3" json:"fee,omitempty"`       // комиссия банка, списывается сверх amount
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *UpdateBalanceRequest) Reset() {
-	*x = UpdateBalanceRequest{}
+func (x *ApplyTransferRequest) Reset() {
+	*x = ApplyTransferRequest{}
 	mi := &file_account_account_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *UpdateBalanceRequest) String() string {
+func (x *ApplyTransferRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*UpdateBalanceRequest) ProtoMessage() {}
+func (*ApplyTransferRequest) ProtoMessage() {}
 
-func (x *UpdateBalanceRequest) ProtoReflect() protoreflect.Message {
+func (x *ApplyTransferRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_account_account_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -470,75 +519,74 @@ func (x *UpdateBalanceRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use UpdateBalanceRequest.ProtoReflect.Descriptor instead.
-func (*UpdateBalanceRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use ApplyTransferRequest.ProtoReflect.Descriptor instead.
+func (*ApplyTransferRequest) Descriptor() ([]byte, []int) {
 	return file_account_account_proto_rawDescGZIP(), []int{7}
 }
 
-func (x *UpdateBalanceRequest) GetFromAccountId() string {
+func (x *ApplyTransferRequest) GetTransferId() string {
+	if x != nil {
+		return x.TransferId
+	}
+	return ""
+}
+
+func (x *ApplyTransferRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *ApplyTransferRequest) GetFromAccountId() string {
 	if x != nil {
 		return x.FromAccountId
 	}
 	return ""
 }
 
-func (x *UpdateBalanceRequest) GetToAccountId() string {
+func (x *ApplyTransferRequest) GetToAccountId() string {
 	if x != nil {
 		return x.ToAccountId
 	}
 	return ""
 }
 
-func (x *UpdateBalanceRequest) GetAmount() float64 {
+func (x *ApplyTransferRequest) GetAmount() int64 {
 	if x != nil {
 		return x.Amount
 	}
 	return 0
 }
 
-func (x *UpdateBalanceRequest) GetFeeAmount() float64 {
+func (x *ApplyTransferRequest) GetFee() int64 {
 	if x != nil {
-		return x.FeeAmount
+		return x.Fee
 	}
 	return 0
 }
 
-func (x *UpdateBalanceRequest) GetTotalDebit() float64 {
-	if x != nil {
-		return x.TotalDebit
-	}
-	return 0
+type ApplyTransferResponse struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	AlreadyApplied bool                   `protobuf:"varint,1,opt,name=already_applied,json=alreadyApplied,proto3" json:"already_applied,omitempty"` // true, если перевод был применён раньше (повторный вызов)
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
-func (x *UpdateBalanceRequest) GetFeeAccountId() string {
-	if x != nil {
-		return x.FeeAccountId
-	}
-	return ""
-}
-
-type UpdateBalanceResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
-	ErrorMessage  string                 `protobuf:"bytes,2,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *UpdateBalanceResponse) Reset() {
-	*x = UpdateBalanceResponse{}
+func (x *ApplyTransferResponse) Reset() {
+	*x = ApplyTransferResponse{}
 	mi := &file_account_account_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *UpdateBalanceResponse) String() string {
+func (x *ApplyTransferResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*UpdateBalanceResponse) ProtoMessage() {}
+func (*ApplyTransferResponse) ProtoMessage() {}
 
-func (x *UpdateBalanceResponse) ProtoReflect() protoreflect.Message {
+func (x *ApplyTransferResponse) ProtoReflect() protoreflect.Message {
 	mi := &file_account_account_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -550,23 +598,104 @@ func (x *UpdateBalanceResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use UpdateBalanceResponse.ProtoReflect.Descriptor instead.
-func (*UpdateBalanceResponse) Descriptor() ([]byte, []int) {
+// Deprecated: Use ApplyTransferResponse.ProtoReflect.Descriptor instead.
+func (*ApplyTransferResponse) Descriptor() ([]byte, []int) {
 	return file_account_account_proto_rawDescGZIP(), []int{8}
 }
 
-func (x *UpdateBalanceResponse) GetSuccess() bool {
+func (x *ApplyTransferResponse) GetAlreadyApplied() bool {
 	if x != nil {
-		return x.Success
+		return x.AlreadyApplied
 	}
 	return false
 }
 
-func (x *UpdateBalanceResponse) GetErrorMessage() string {
+type ResolveTransferRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TransferId    string                 `protobuf:"bytes,1,opt,name=transfer_id,json=transferId,proto3" json:"transfer_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResolveTransferRequest) Reset() {
+	*x = ResolveTransferRequest{}
+	mi := &file_account_account_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResolveTransferRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResolveTransferRequest) ProtoMessage() {}
+
+func (x *ResolveTransferRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_account_account_proto_msgTypes[9]
 	if x != nil {
-		return x.ErrorMessage
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResolveTransferRequest.ProtoReflect.Descriptor instead.
+func (*ResolveTransferRequest) Descriptor() ([]byte, []int) {
+	return file_account_account_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *ResolveTransferRequest) GetTransferId() string {
+	if x != nil {
+		return x.TransferId
 	}
 	return ""
+}
+
+type ResolveTransferResponse struct {
+	state         protoimpl.MessageState          `protogen:"open.v1"`
+	Outcome       ResolveTransferResponse_Outcome `protobuf:"varint,1,opt,name=outcome,proto3,enum=account.ResolveTransferResponse_Outcome" json:"outcome,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResolveTransferResponse) Reset() {
+	*x = ResolveTransferResponse{}
+	mi := &file_account_account_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResolveTransferResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResolveTransferResponse) ProtoMessage() {}
+
+func (x *ResolveTransferResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_account_account_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResolveTransferResponse.ProtoReflect.Descriptor instead.
+func (*ResolveTransferResponse) Descriptor() ([]byte, []int) {
+	return file_account_account_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *ResolveTransferResponse) GetOutcome() ResolveTransferResponse_Outcome {
+	if x != nil {
+		return x.Outcome
+	}
+	return ResolveTransferResponse_OUTCOME_UNSPECIFIED
 }
 
 var File_account_account_proto protoreflect.FileDescriptor
@@ -594,7 +723,7 @@ const file_account_account_proto_rawDesc = "" +
 	"\x0fAccountResponse\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x17\n" +
 	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x18\n" +
-	"\abalance\x18\x03 \x01(\x01R\abalance\x12\x16\n" +
+	"\abalance\x18\x03 \x01(\x03R\abalance\x12\x16\n" +
 	"\x06status\x18\x04 \x01(\tR\x06status\x12\x1d\n" +
 	"\n" +
 	"created_at\x18\x05 \x01(\tR\tcreatedAt\"\xf2\x01\n" +
@@ -604,26 +733,34 @@ const file_account_account_proto_rawDesc = "" +
 	"\factive_count\x18\x03 \x01(\x05R\vactiveCount\x12!\n" +
 	"\fclosed_count\x18\x04 \x01(\x05R\vclosedCount\x12!\n" +
 	"\fmax_accounts\x18\x05 \x01(\x05R\vmaxAccounts\x12&\n" +
-	"\x0fcan_create_more\x18\x06 \x01(\bR\rcanCreateMore\"\xe0\x01\n" +
-	"\x14UpdateBalanceRequest\x12&\n" +
-	"\x0ffrom_account_id\x18\x01 \x01(\tR\rfromAccountId\x12\"\n" +
-	"\rto_account_id\x18\x02 \x01(\tR\vtoAccountId\x12\x16\n" +
-	"\x06amount\x18\x03 \x01(\x01R\x06amount\x12\x1d\n" +
-	"\n" +
-	"fee_amount\x18\x04 \x01(\x01R\tfeeAmount\x12\x1f\n" +
-	"\vtotal_debit\x18\x05 \x01(\x01R\n" +
-	"totalDebit\x12$\n" +
-	"\x0efee_account_id\x18\x06 \x01(\tR\ffeeAccountId\"V\n" +
-	"\x15UpdateBalanceResponse\x12\x18\n" +
-	"\asuccess\x18\x01 \x01(\bR\asuccess\x12#\n" +
-	"\rerror_message\x18\x02 \x01(\tR\ferrorMessage2\x90\x03\n" +
+	"\x0fcan_create_more\x18\x06 \x01(\bR\rcanCreateMore\"\xc6\x01\n" +
+	"\x14ApplyTransferRequest\x12\x1f\n" +
+	"\vtransfer_id\x18\x01 \x01(\tR\n" +
+	"transferId\x12\x17\n" +
+	"\auser_id\x18\x02 \x01(\tR\x06userId\x12&\n" +
+	"\x0ffrom_account_id\x18\x03 \x01(\tR\rfromAccountId\x12\"\n" +
+	"\rto_account_id\x18\x04 \x01(\tR\vtoAccountId\x12\x16\n" +
+	"\x06amount\x18\x05 \x01(\x03R\x06amount\x12\x10\n" +
+	"\x03fee\x18\x06 \x01(\x03R\x03fee\"@\n" +
+	"\x15ApplyTransferResponse\x12'\n" +
+	"\x0falready_applied\x18\x01 \x01(\bR\x0ealreadyApplied\"9\n" +
+	"\x16ResolveTransferRequest\x12\x1f\n" +
+	"\vtransfer_id\x18\x01 \x01(\tR\n" +
+	"transferId\"\x9b\x01\n" +
+	"\x17ResolveTransferResponse\x12B\n" +
+	"\aoutcome\x18\x01 \x01(\x0e2(.account.ResolveTransferResponse.OutcomeR\aoutcome\"<\n" +
+	"\aOutcome\x12\x17\n" +
+	"\x13OUTCOME_UNSPECIFIED\x10\x00\x12\v\n" +
+	"\aAPPLIED\x10\x01\x12\v\n" +
+	"\aABORTED\x10\x022\xe6\x03\n" +
 	"\x0eAccountService\x12H\n" +
 	"\rCreateAccount\x12\x1d.account.CreateAccountRequest\x1a\x18.account.AccountResponse\x12B\n" +
 	"\n" +
 	"GetAccount\x12\x1a.account.GetAccountRequest\x1a\x18.account.AccountResponse\x12P\n" +
 	"\x0fGetUserAccounts\x12\x1f.account.GetUserAccountsRequest\x1a\x1c.account.AccountListResponse\x12N\n" +
 	"\rDeleteAccount\x12\x1d.account.DeleteAccountRequest\x1a\x1e.account.DeleteAccountResponse\x12N\n" +
-	"\rUpdateBalance\x12\x1d.account.UpdateBalanceRequest\x1a\x1e.account.UpdateBalanceResponseB(Z&bank-prototype/proto/account;accountpbb\x06proto3"
+	"\rApplyTransfer\x12\x1d.account.ApplyTransferRequest\x1a\x1e.account.ApplyTransferResponse\x12T\n" +
+	"\x0fResolveTransfer\x12\x1f.account.ResolveTransferRequest\x1a .account.ResolveTransferResponseB1Z/bank_proto_microservice/proto/account;accountpbb\x06proto3"
 
 var (
 	file_account_account_proto_rawDescOnce sync.Once
@@ -637,35 +774,42 @@ func file_account_account_proto_rawDescGZIP() []byte {
 	return file_account_account_proto_rawDescData
 }
 
-var file_account_account_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_account_account_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_account_account_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_account_account_proto_goTypes = []any{
-	(*CreateAccountRequest)(nil),   // 0: account.CreateAccountRequest
-	(*GetAccountRequest)(nil),      // 1: account.GetAccountRequest
-	(*GetUserAccountsRequest)(nil), // 2: account.GetUserAccountsRequest
-	(*DeleteAccountRequest)(nil),   // 3: account.DeleteAccountRequest
-	(*DeleteAccountResponse)(nil),  // 4: account.DeleteAccountResponse
-	(*AccountResponse)(nil),        // 5: account.AccountResponse
-	(*AccountListResponse)(nil),    // 6: account.AccountListResponse
-	(*UpdateBalanceRequest)(nil),   // 7: account.UpdateBalanceRequest
-	(*UpdateBalanceResponse)(nil),  // 8: account.UpdateBalanceResponse
+	(ResolveTransferResponse_Outcome)(0), // 0: account.ResolveTransferResponse.Outcome
+	(*CreateAccountRequest)(nil),         // 1: account.CreateAccountRequest
+	(*GetAccountRequest)(nil),            // 2: account.GetAccountRequest
+	(*GetUserAccountsRequest)(nil),       // 3: account.GetUserAccountsRequest
+	(*DeleteAccountRequest)(nil),         // 4: account.DeleteAccountRequest
+	(*DeleteAccountResponse)(nil),        // 5: account.DeleteAccountResponse
+	(*AccountResponse)(nil),              // 6: account.AccountResponse
+	(*AccountListResponse)(nil),          // 7: account.AccountListResponse
+	(*ApplyTransferRequest)(nil),         // 8: account.ApplyTransferRequest
+	(*ApplyTransferResponse)(nil),        // 9: account.ApplyTransferResponse
+	(*ResolveTransferRequest)(nil),       // 10: account.ResolveTransferRequest
+	(*ResolveTransferResponse)(nil),      // 11: account.ResolveTransferResponse
 }
 var file_account_account_proto_depIdxs = []int32{
-	5, // 0: account.AccountListResponse.accounts:type_name -> account.AccountResponse
-	0, // 1: account.AccountService.CreateAccount:input_type -> account.CreateAccountRequest
-	1, // 2: account.AccountService.GetAccount:input_type -> account.GetAccountRequest
-	2, // 3: account.AccountService.GetUserAccounts:input_type -> account.GetUserAccountsRequest
-	3, // 4: account.AccountService.DeleteAccount:input_type -> account.DeleteAccountRequest
-	7, // 5: account.AccountService.UpdateBalance:input_type -> account.UpdateBalanceRequest
-	5, // 6: account.AccountService.CreateAccount:output_type -> account.AccountResponse
-	5, // 7: account.AccountService.GetAccount:output_type -> account.AccountResponse
-	6, // 8: account.AccountService.GetUserAccounts:output_type -> account.AccountListResponse
-	4, // 9: account.AccountService.DeleteAccount:output_type -> account.DeleteAccountResponse
-	8, // 10: account.AccountService.UpdateBalance:output_type -> account.UpdateBalanceResponse
-	6, // [6:11] is the sub-list for method output_type
-	1, // [1:6] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	6,  // 0: account.AccountListResponse.accounts:type_name -> account.AccountResponse
+	0,  // 1: account.ResolveTransferResponse.outcome:type_name -> account.ResolveTransferResponse.Outcome
+	1,  // 2: account.AccountService.CreateAccount:input_type -> account.CreateAccountRequest
+	2,  // 3: account.AccountService.GetAccount:input_type -> account.GetAccountRequest
+	3,  // 4: account.AccountService.GetUserAccounts:input_type -> account.GetUserAccountsRequest
+	4,  // 5: account.AccountService.DeleteAccount:input_type -> account.DeleteAccountRequest
+	8,  // 6: account.AccountService.ApplyTransfer:input_type -> account.ApplyTransferRequest
+	10, // 7: account.AccountService.ResolveTransfer:input_type -> account.ResolveTransferRequest
+	6,  // 8: account.AccountService.CreateAccount:output_type -> account.AccountResponse
+	6,  // 9: account.AccountService.GetAccount:output_type -> account.AccountResponse
+	7,  // 10: account.AccountService.GetUserAccounts:output_type -> account.AccountListResponse
+	5,  // 11: account.AccountService.DeleteAccount:output_type -> account.DeleteAccountResponse
+	9,  // 12: account.AccountService.ApplyTransfer:output_type -> account.ApplyTransferResponse
+	11, // 13: account.AccountService.ResolveTransfer:output_type -> account.ResolveTransferResponse
+	8,  // [8:14] is the sub-list for method output_type
+	2,  // [2:8] is the sub-list for method input_type
+	2,  // [2:2] is the sub-list for extension type_name
+	2,  // [2:2] is the sub-list for extension extendee
+	0,  // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_account_account_proto_init() }
@@ -678,13 +822,14 @@ func file_account_account_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_account_account_proto_rawDesc), len(file_account_account_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   9,
+			NumEnums:      1,
+			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_account_account_proto_goTypes,
 		DependencyIndexes: file_account_account_proto_depIdxs,
+		EnumInfos:         file_account_account_proto_enumTypes,
 		MessageInfos:      file_account_account_proto_msgTypes,
 	}.Build()
 	File_account_account_proto = out.File

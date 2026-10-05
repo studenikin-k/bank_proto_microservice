@@ -4,190 +4,177 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
+	"log/slog"
+	"time"
 
 	"bank_proto_microservice/internal/account/cache"
 	"bank_proto_microservice/internal/account/models"
 	"bank_proto_microservice/internal/account/repository"
-	"bank_proto_microservice/internal/utils"
+	"bank_proto_microservice/internal/money"
 
-	"github.com/redis/go-redis/v9"
+	"github.com/google/uuid"
 )
 
-var (
-	ErrUnauthorizedAccess   = errors.New("нет доступа к данному счёту")
-	ErrAccountAlreadyClosed = errors.New("счёт уже закрыт")
-	ErrAccountLimitReached  = errors.New("достигнут лимит активных счетов (максимум 5)")
-)
+// ErrInvalid — некорректные входные данные.
+var ErrInvalid = errors.New("некорректный запрос")
 
 const MaxActiveAccounts = 5
 
 type AccountService struct {
-	accountRepo *repository.AccountRepository
-	cache       *cache.RedisCache
+	repo           *repository.AccountRepository
+	cache          *cache.RedisCache // nil — кеш выключен
+	openingBalance money.Amount
 }
 
-func NewAccountService(accountRepo *repository.AccountRepository, cache *cache.RedisCache) *AccountService {
-	utils.LogSuccess("AccountService", "Инициализирован сервис счетов")
-	return &AccountService{
-		accountRepo: accountRepo,
-		cache:       cache,
-	}
+func NewAccountService(repo *repository.AccountRepository, c *cache.RedisCache, openingBalance money.Amount) *AccountService {
+	return &AccountService{repo: repo, cache: c, openingBalance: openingBalance}
+}
+
+func invalid(format string, args ...any) error {
+	return fmt.Errorf("%w: %s", ErrInvalid, fmt.Sprintf(format, args...))
 }
 
 func (s *AccountService) CreateAccount(ctx context.Context, userID string) (*models.Account, error) {
-	utils.LogInfo("AccountService", "Создание нового счёта для пользователя %s", userID)
-
-	activeCount, err := s.accountRepo.CountActiveAccountsByUserID(ctx, userID)
+	if uuid.Validate(userID) != nil {
+		return nil, invalid("user_id должен быть UUID")
+	}
+	acc, err := s.repo.Create(ctx, userID, s.openingBalance, MaxActiveAccounts)
 	if err != nil {
-		utils.LogError("AccountService", "Ошибка проверки лимита счетов", err)
 		return nil, err
 	}
-
-	if activeCount >= MaxActiveAccounts {
-		utils.LogWarning("AccountService", "Пользователь %s достиг лимита активных счетов (%d/%d)", userID, activeCount, MaxActiveAccounts)
-		return nil, ErrAccountLimitReached
-	}
-
-	account, err := s.accountRepo.Create(ctx, userID)
-	if err != nil {
-		utils.LogError("AccountService", fmt.Sprintf("Ошибка создания счёта для пользователя %s", userID), err)
-		return nil, err
-	}
-
-	if s.cache != nil {
-		_ = s.cache.Delete(ctx, cache.UserAccountsKey(userID))
-		utils.LogInfo("Cache", "Инвалидирован кеш списка счетов пользователя %s", userID)
-	}
-
-	utils.LogSuccess("AccountService", "Счёт %s успешно создан для пользователя %s (баланс: %.2f)", account.ID, userID, account.Balance)
-	return account, nil
+	s.invalidate(ctx, cache.UserAccountsKey(userID))
+	return acc, nil
 }
 
+// GetAccount возвращает счёт, если он принадлежит пользователю.
 func (s *AccountService) GetAccount(ctx context.Context, accountID, userID string) (*models.Account, error) {
-	utils.LogInfo("AccountService", "Получение информации о счёте %s", accountID)
-
-	var account *models.Account
-	var err error
-
-	if s.cache != nil {
-		balanceKey := cache.AccountBalanceKey(accountID)
-		balanceStr, cacheErr := s.cache.Get(ctx, balanceKey)
-		if cacheErr == nil {
-			utils.LogSuccess("Cache", "HIT: Баланс счёта %s найден в кеше: %s", accountID, balanceStr)
-			account, err = s.accountRepo.GetByID(ctx, accountID)
-			if err != nil {
-				utils.LogError("AccountService", fmt.Sprintf("Счёт %s не найден", accountID), err)
-				return nil, repository.ErrAccountNotFound
-			}
-			if bal, parseErr := strconv.ParseFloat(balanceStr, 64); parseErr == nil {
-				account.Balance = bal
-			}
-		} else if !errors.Is(cacheErr, redis.Nil) {
-			utils.LogWarning("Cache", "Ошибка чтения из кеша: %v", cacheErr)
-		} else {
-			utils.LogInfo("Cache", "MISS: Баланс счёта %s не найден в кеше", accountID)
-		}
+	var acc models.Account
+	key := cache.AccountKey(accountID)
+	hit, err := s.cache.GetJSON(ctx, key, &acc)
+	if err != nil {
+		slog.Debug("ошибка чтения кеша", "key", key, "err", err)
 	}
-
-	if account == nil {
-		account, err = s.accountRepo.GetByID(ctx, accountID)
+	if !hit {
+		dbAcc, err := s.repo.GetByID(ctx, accountID)
 		if err != nil {
-			utils.LogError("AccountService", fmt.Sprintf("Счёт %s не найден", accountID), err)
-			return nil, repository.ErrAccountNotFound
+			return nil, err
 		}
-		if s.cache != nil {
-			balanceKey := cache.AccountBalanceKey(accountID)
-			_ = s.cache.Set(ctx, balanceKey, fmt.Sprintf("%.2f", account.Balance), cache.AccountBalanceTTL)
-			utils.LogSuccess("Cache", "Баланс счёта %s сохранён в кеш: %.2f (TTL: %v)", accountID, account.Balance, cache.AccountBalanceTTL)
+		acc = *dbAcc
+		if err := s.cache.SetJSON(ctx, key, acc); err != nil {
+			slog.Debug("ошибка записи в кеш", "key", key, "err", err)
 		}
 	}
-
-	if account.UserID != userID {
-		utils.LogWarning("AccountService", "Попытка доступа к чужому счёту %s пользователем %s", accountID, userID)
-		return nil, ErrUnauthorizedAccess
+	if acc.UserID != userID {
+		return nil, repository.ErrForbidden
 	}
-	if account.Status != "active" {
-		utils.LogWarning("AccountService", "Попытка доступа к закрытому счёту %s", accountID)
-		return nil, repository.ErrAccountClosed
-	}
-
-	utils.LogSuccess("AccountService", "Информация о счёте %s получена (баланс: %.2f)", accountID, account.Balance)
-	return account, nil
+	return &acc, nil
 }
 
 func (s *AccountService) GetUserAccounts(ctx context.Context, userID string) ([]models.Account, error) {
-	utils.LogInfo("AccountService", "Получение списка счетов пользователя %s", userID)
-
-	if s.cache != nil {
-		cacheKey := cache.UserAccountsKey(userID)
-		var accounts []models.Account
-		if err := s.cache.GetJSON(ctx, cacheKey, &accounts); err == nil {
-			utils.LogSuccess("Cache", "HIT: Список счетов пользователя %s получен из кеша (%d счетов)", userID, len(accounts))
-			return accounts, nil
-		}
-		utils.LogInfo("Cache", "MISS: Список счетов пользователя %s не найден в кеше", userID)
+	if uuid.Validate(userID) != nil {
+		return nil, invalid("user_id должен быть UUID")
+	}
+	key := cache.UserAccountsKey(userID)
+	var accounts []models.Account
+	hit, err := s.cache.GetJSON(ctx, key, &accounts)
+	if err != nil {
+		slog.Debug("ошибка чтения кеша", "key", key, "err", err)
+	}
+	if hit {
+		return accounts, nil
 	}
 
-	accounts, err := s.accountRepo.GetByUserID(ctx, userID)
+	accounts, err = s.repo.ListByUser(ctx, userID)
 	if err != nil {
-		utils.LogError("AccountService", fmt.Sprintf("Ошибка получения счетов пользователя %s", userID), err)
 		return nil, err
 	}
-
-	if s.cache != nil {
-		cacheKey := cache.UserAccountsKey(userID)
-		_ = s.cache.SetJSON(ctx, cacheKey, accounts, cache.UserAccountsTTL)
-		utils.LogSuccess("Cache", "Список счетов пользователя %s сохранён в кеш (TTL: %v)", userID, cache.UserAccountsTTL)
+	if err := s.cache.SetJSON(ctx, key, accounts); err != nil {
+		slog.Debug("ошибка записи в кеш", "key", key, "err", err)
 	}
 	return accounts, nil
 }
 
-func (s *AccountService) DeleteAccount(ctx context.Context, accountID, userID string) error {
-	utils.LogInfo("AccountService", "Закрытие счёта %s пользователем %s", accountID, userID)
-
-	account, err := s.accountRepo.GetByID(ctx, accountID)
-	if err != nil {
-		utils.LogError("AccountService", fmt.Sprintf("Счёт %s не найден", accountID), err)
-		return repository.ErrAccountNotFound
-	}
-	if account.UserID != userID {
-		utils.LogWarning("AccountService", "Попытка закрыть чужой счёт %s пользователем %s", accountID, userID)
-		return ErrUnauthorizedAccess
-	}
-	if account.Status == "closed" {
-		utils.LogWarning("AccountService", "Счёт %s уже закрыт", accountID)
-		return ErrAccountAlreadyClosed
-	}
-
-	if err := s.accountRepo.UpdateStatus(ctx, accountID, "closed"); err != nil {
-		utils.LogError("AccountService", fmt.Sprintf("Ошибка изменения статуса счёта %s", accountID), err)
+func (s *AccountService) CloseAccount(ctx context.Context, accountID, userID string) error {
+	if err := s.repo.Close(ctx, accountID, userID); err != nil {
 		return err
 	}
-
-	if s.cache != nil {
-		_ = s.cache.Delete(ctx, cache.AccountBalanceKey(accountID), cache.UserAccountsKey(userID))
-		utils.LogInfo("Cache", "Инвалидирован кеш для счёта %s и пользователя %s", accountID, userID)
-	}
-
-	utils.LogSuccess("AccountService", "Счёт %s успешно закрыт", accountID)
+	s.invalidate(ctx, cache.AccountKey(accountID), cache.UserAccountsKey(userID))
 	return nil
 }
 
-func (s *AccountService) UpdateBalance(ctx context.Context, fromID, toID, feeID string, amount, totalDebit, feeAmount float64) error {
-	utils.LogInfo("AccountService", "Выполнение списания: %s -> %s (Сумма: %.2f, Списание: %.2f)", fromID, toID, amount, totalDebit)
+// ApplyTransfer — шаг саги перевода (см. AccountRepository.ApplyTransfer).
+func (s *AccountService) ApplyTransfer(ctx context.Context, t models.Transfer) (*models.ApplyResult, error) {
+	switch {
+	case uuid.Validate(t.ID) != nil:
+		return nil, invalid("transfer_id должен быть UUID")
+	case uuid.Validate(t.UserID) != nil:
+		return nil, invalid("user_id должен быть UUID")
+	case t.FromID == "" || t.ToID == "":
+		return nil, invalid("не указан счёт списания или зачисления")
+	case t.FromID == t.ToID:
+		return nil, invalid("нельзя переводить на тот же счёт")
+	case t.Amount <= 0 || t.Amount > money.MaxAmount:
+		return nil, invalid("сумма перевода должна быть больше 0 и не больше %s", money.MaxAmount)
+	case t.Fee < 0 || t.Fee > t.Amount:
+		return nil, invalid("некорректная комиссия")
+	}
 
-	err := s.accountRepo.ExecuteTransferTx(ctx, fromID, toID, feeID, amount, totalDebit, feeAmount)
+	res, err := s.repo.ApplyTransfer(ctx, t)
 	if err != nil {
-		utils.LogError("AccountService", "Ошибка ExecuteTransferTx", err)
-		return err
+		return nil, err
 	}
-
-	if s.cache != nil {
-		_ = s.cache.Delete(ctx, cache.AccountBalanceKey(fromID), cache.AccountBalanceKey(toID))
-		utils.LogInfo("Cache", "Инвалидирован кеш балансов для счетов %s и %s", fromID, toID)
+	if !res.AlreadyApplied {
+		// Удаляем ключи после COMMIT: следующее чтение возьмёт свежий баланс из БД.
+		s.invalidate(ctx,
+			cache.AccountKey(t.FromID), cache.AccountKey(t.ToID),
+			cache.UserAccountsKey(res.FromUserID), cache.UserAccountsKey(res.ToUserID))
 	}
+	return res, nil
+}
 
-	utils.LogSuccess("AccountService", "Балансы успешно обновлены для счетов %s и %s", fromID, toID)
-	return nil
+func (s *AccountService) ResolveTransfer(ctx context.Context, transferID string) (applied bool, err error) {
+	if uuid.Validate(transferID) != nil {
+		return false, invalid("transfer_id должен быть UUID")
+	}
+	return s.repo.ResolveTransfer(ctx, transferID)
+}
+
+// RunFeeSweeper периодически переносит собранные комиссии на системный счёт.
+func (s *AccountService) RunFeeSweeper(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		for {
+			sweepCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			n, total, err := s.repo.SweepFees(sweepCtx, 10000)
+			cancel()
+			if err != nil {
+				if ctx.Err() == nil {
+					slog.Warn("перенос комиссий не удался", "err", err)
+				}
+				break
+			}
+			if n > 0 {
+				s.invalidate(ctx, cache.AccountKey(repository.SystemBankAccountID))
+				slog.Debug("комиссии перенесены на системный счёт", "transfers", n, "total", total.String())
+			}
+			if n < 10000 {
+				break
+			}
+		}
+	}
+}
+
+func (s *AccountService) invalidate(ctx context.Context, keys ...string) {
+	if err := s.cache.Delete(context.WithoutCancel(ctx), keys...); err != nil {
+		slog.Warn("не удалось инвалидировать кеш, данные могут устареть на время TTL", "keys", keys, "err", err)
+	}
 }

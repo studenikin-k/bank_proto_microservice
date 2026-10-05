@@ -23,19 +23,29 @@ const (
 	AccountService_GetAccount_FullMethodName      = "/account.AccountService/GetAccount"
 	AccountService_GetUserAccounts_FullMethodName = "/account.AccountService/GetUserAccounts"
 	AccountService_DeleteAccount_FullMethodName   = "/account.AccountService/DeleteAccount"
-	AccountService_UpdateBalance_FullMethodName   = "/account.AccountService/UpdateBalance"
+	AccountService_ApplyTransfer_FullMethodName   = "/account.AccountService/ApplyTransfer"
+	AccountService_ResolveTransfer_FullMethodName = "/account.AccountService/ResolveTransfer"
 )
 
 // AccountServiceClient is the client API for AccountService service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// Все денежные суммы передаются как int64 в копейках.
 type AccountServiceClient interface {
 	CreateAccount(ctx context.Context, in *CreateAccountRequest, opts ...grpc.CallOption) (*AccountResponse, error)
 	GetAccount(ctx context.Context, in *GetAccountRequest, opts ...grpc.CallOption) (*AccountResponse, error)
 	GetUserAccounts(ctx context.Context, in *GetUserAccountsRequest, opts ...grpc.CallOption) (*AccountListResponse, error)
 	DeleteAccount(ctx context.Context, in *DeleteAccountRequest, opts ...grpc.CallOption) (*DeleteAccountResponse, error)
-	// Метод вызывается Transaction Service для атомарного списания/начисления
-	UpdateBalance(ctx context.Context, in *UpdateBalanceRequest, opts ...grpc.CallOption) (*UpdateBalanceResponse, error)
+	// Шаг саги перевода: в одной локальной транзакции списывает amount + fee со счёта
+	// from_account_id и зачисляет amount на счёт to_account_id.
+	// Идемпотентен по transfer_id: повторный вызов не списывает деньги второй раз.
+	ApplyTransfer(ctx context.Context, in *ApplyTransferRequest, opts ...grpc.CallOption) (*ApplyTransferResponse, error)
+	// Фиксирует окончательный исход перевода, результат которого неизвестен
+	// Transaction Service (таймаут, обрыв связи, падение процесса).
+	// Если перевод ещё не применён, transfer_id навсегда помечается отменённым,
+	// и поздний ApplyTransfer с этим id будет отклонён.
+	ResolveTransfer(ctx context.Context, in *ResolveTransferRequest, opts ...grpc.CallOption) (*ResolveTransferResponse, error)
 }
 
 type accountServiceClient struct {
@@ -86,10 +96,20 @@ func (c *accountServiceClient) DeleteAccount(ctx context.Context, in *DeleteAcco
 	return out, nil
 }
 
-func (c *accountServiceClient) UpdateBalance(ctx context.Context, in *UpdateBalanceRequest, opts ...grpc.CallOption) (*UpdateBalanceResponse, error) {
+func (c *accountServiceClient) ApplyTransfer(ctx context.Context, in *ApplyTransferRequest, opts ...grpc.CallOption) (*ApplyTransferResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(UpdateBalanceResponse)
-	err := c.cc.Invoke(ctx, AccountService_UpdateBalance_FullMethodName, in, out, cOpts...)
+	out := new(ApplyTransferResponse)
+	err := c.cc.Invoke(ctx, AccountService_ApplyTransfer_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *accountServiceClient) ResolveTransfer(ctx context.Context, in *ResolveTransferRequest, opts ...grpc.CallOption) (*ResolveTransferResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ResolveTransferResponse)
+	err := c.cc.Invoke(ctx, AccountService_ResolveTransfer_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -99,13 +119,22 @@ func (c *accountServiceClient) UpdateBalance(ctx context.Context, in *UpdateBala
 // AccountServiceServer is the server API for AccountService service.
 // All implementations must embed UnimplementedAccountServiceServer
 // for forward compatibility.
+//
+// Все денежные суммы передаются как int64 в копейках.
 type AccountServiceServer interface {
 	CreateAccount(context.Context, *CreateAccountRequest) (*AccountResponse, error)
 	GetAccount(context.Context, *GetAccountRequest) (*AccountResponse, error)
 	GetUserAccounts(context.Context, *GetUserAccountsRequest) (*AccountListResponse, error)
 	DeleteAccount(context.Context, *DeleteAccountRequest) (*DeleteAccountResponse, error)
-	// Метод вызывается Transaction Service для атомарного списания/начисления
-	UpdateBalance(context.Context, *UpdateBalanceRequest) (*UpdateBalanceResponse, error)
+	// Шаг саги перевода: в одной локальной транзакции списывает amount + fee со счёта
+	// from_account_id и зачисляет amount на счёт to_account_id.
+	// Идемпотентен по transfer_id: повторный вызов не списывает деньги второй раз.
+	ApplyTransfer(context.Context, *ApplyTransferRequest) (*ApplyTransferResponse, error)
+	// Фиксирует окончательный исход перевода, результат которого неизвестен
+	// Transaction Service (таймаут, обрыв связи, падение процесса).
+	// Если перевод ещё не применён, transfer_id навсегда помечается отменённым,
+	// и поздний ApplyTransfer с этим id будет отклонён.
+	ResolveTransfer(context.Context, *ResolveTransferRequest) (*ResolveTransferResponse, error)
 	mustEmbedUnimplementedAccountServiceServer()
 }
 
@@ -128,8 +157,11 @@ func (UnimplementedAccountServiceServer) GetUserAccounts(context.Context, *GetUs
 func (UnimplementedAccountServiceServer) DeleteAccount(context.Context, *DeleteAccountRequest) (*DeleteAccountResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteAccount not implemented")
 }
-func (UnimplementedAccountServiceServer) UpdateBalance(context.Context, *UpdateBalanceRequest) (*UpdateBalanceResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method UpdateBalance not implemented")
+func (UnimplementedAccountServiceServer) ApplyTransfer(context.Context, *ApplyTransferRequest) (*ApplyTransferResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ApplyTransfer not implemented")
+}
+func (UnimplementedAccountServiceServer) ResolveTransfer(context.Context, *ResolveTransferRequest) (*ResolveTransferResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ResolveTransfer not implemented")
 }
 func (UnimplementedAccountServiceServer) mustEmbedUnimplementedAccountServiceServer() {}
 func (UnimplementedAccountServiceServer) testEmbeddedByValue()                        {}
@@ -224,20 +256,38 @@ func _AccountService_DeleteAccount_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
-func _AccountService_UpdateBalance_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(UpdateBalanceRequest)
+func _AccountService_ApplyTransfer_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ApplyTransferRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(AccountServiceServer).UpdateBalance(ctx, in)
+		return srv.(AccountServiceServer).ApplyTransfer(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: AccountService_UpdateBalance_FullMethodName,
+		FullMethod: AccountService_ApplyTransfer_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(AccountServiceServer).UpdateBalance(ctx, req.(*UpdateBalanceRequest))
+		return srv.(AccountServiceServer).ApplyTransfer(ctx, req.(*ApplyTransferRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AccountService_ResolveTransfer_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResolveTransferRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AccountServiceServer).ResolveTransfer(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AccountService_ResolveTransfer_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AccountServiceServer).ResolveTransfer(ctx, req.(*ResolveTransferRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -266,8 +316,12 @@ var AccountService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _AccountService_DeleteAccount_Handler,
 		},
 		{
-			MethodName: "UpdateBalance",
-			Handler:    _AccountService_UpdateBalance_Handler,
+			MethodName: "ApplyTransfer",
+			Handler:    _AccountService_ApplyTransfer_Handler,
+		},
+		{
+			MethodName: "ResolveTransfer",
+			Handler:    _AccountService_ResolveTransfer_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

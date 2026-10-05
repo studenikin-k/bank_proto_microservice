@@ -19,20 +19,25 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	TransactionService_Transfer_FullMethodName      = "/transaction.TransactionService/Transfer"
-	TransactionService_Payment_FullMethodName       = "/transaction.TransactionService/Payment"
-	TransactionService_TransferAsync_FullMethodName = "/transaction.TransactionService/TransferAsync"
-	TransactionService_GetHistory_FullMethodName    = "/transaction.TransactionService/GetHistory"
-	TransactionService_GetByID_FullMethodName       = "/transaction.TransactionService/GetByID"
+	TransactionService_CreateTransaction_FullMethodName      = "/transaction.TransactionService/CreateTransaction"
+	TransactionService_CreateTransactionAsync_FullMethodName = "/transaction.TransactionService/CreateTransactionAsync"
+	TransactionService_GetHistory_FullMethodName             = "/transaction.TransactionService/GetHistory"
+	TransactionService_GetByID_FullMethodName                = "/transaction.TransactionService/GetByID"
 )
 
 // TransactionServiceClient is the client API for TransactionService service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// Все денежные суммы передаются как int64 в копейках.
 type TransactionServiceClient interface {
-	Transfer(ctx context.Context, in *TransferRequest, opts ...grpc.CallOption) (*TransactionResponse, error)
-	Payment(ctx context.Context, in *PaymentRequest, opts ...grpc.CallOption) (*TransactionResponse, error)
-	TransferAsync(ctx context.Context, in *TransferRequest, opts ...grpc.CallOption) (*AsyncResponse, error)
+	// Синхронный перевод или платёж. Сага: запись pending -> AccountService.ApplyTransfer
+	// -> completed / failed. При неизвестном исходе запись остаётся pending,
+	// её доводит до конца recovery-воркер.
+	CreateTransaction(ctx context.Context, in *CreateTransactionRequest, opts ...grpc.CallOption) (*TransactionResponse, error)
+	// Асинхронный вариант: запись создаётся в статусе pending и сразу возвращается,
+	// исполняет её Worker Pool. Итог можно узнать через GetByID.
+	CreateTransactionAsync(ctx context.Context, in *CreateTransactionRequest, opts ...grpc.CallOption) (*TransactionResponse, error)
 	GetHistory(ctx context.Context, in *GetHistoryRequest, opts ...grpc.CallOption) (*TransactionListResponse, error)
 	GetByID(ctx context.Context, in *GetByIDRequest, opts ...grpc.CallOption) (*TransactionResponse, error)
 }
@@ -45,30 +50,20 @@ func NewTransactionServiceClient(cc grpc.ClientConnInterface) TransactionService
 	return &transactionServiceClient{cc}
 }
 
-func (c *transactionServiceClient) Transfer(ctx context.Context, in *TransferRequest, opts ...grpc.CallOption) (*TransactionResponse, error) {
+func (c *transactionServiceClient) CreateTransaction(ctx context.Context, in *CreateTransactionRequest, opts ...grpc.CallOption) (*TransactionResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(TransactionResponse)
-	err := c.cc.Invoke(ctx, TransactionService_Transfer_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, TransactionService_CreateTransaction_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *transactionServiceClient) Payment(ctx context.Context, in *PaymentRequest, opts ...grpc.CallOption) (*TransactionResponse, error) {
+func (c *transactionServiceClient) CreateTransactionAsync(ctx context.Context, in *CreateTransactionRequest, opts ...grpc.CallOption) (*TransactionResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(TransactionResponse)
-	err := c.cc.Invoke(ctx, TransactionService_Payment_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *transactionServiceClient) TransferAsync(ctx context.Context, in *TransferRequest, opts ...grpc.CallOption) (*AsyncResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(AsyncResponse)
-	err := c.cc.Invoke(ctx, TransactionService_TransferAsync_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, TransactionService_CreateTransactionAsync_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -98,10 +93,16 @@ func (c *transactionServiceClient) GetByID(ctx context.Context, in *GetByIDReque
 // TransactionServiceServer is the server API for TransactionService service.
 // All implementations must embed UnimplementedTransactionServiceServer
 // for forward compatibility.
+//
+// Все денежные суммы передаются как int64 в копейках.
 type TransactionServiceServer interface {
-	Transfer(context.Context, *TransferRequest) (*TransactionResponse, error)
-	Payment(context.Context, *PaymentRequest) (*TransactionResponse, error)
-	TransferAsync(context.Context, *TransferRequest) (*AsyncResponse, error)
+	// Синхронный перевод или платёж. Сага: запись pending -> AccountService.ApplyTransfer
+	// -> completed / failed. При неизвестном исходе запись остаётся pending,
+	// её доводит до конца recovery-воркер.
+	CreateTransaction(context.Context, *CreateTransactionRequest) (*TransactionResponse, error)
+	// Асинхронный вариант: запись создаётся в статусе pending и сразу возвращается,
+	// исполняет её Worker Pool. Итог можно узнать через GetByID.
+	CreateTransactionAsync(context.Context, *CreateTransactionRequest) (*TransactionResponse, error)
 	GetHistory(context.Context, *GetHistoryRequest) (*TransactionListResponse, error)
 	GetByID(context.Context, *GetByIDRequest) (*TransactionResponse, error)
 	mustEmbedUnimplementedTransactionServiceServer()
@@ -114,14 +115,11 @@ type TransactionServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedTransactionServiceServer struct{}
 
-func (UnimplementedTransactionServiceServer) Transfer(context.Context, *TransferRequest) (*TransactionResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method Transfer not implemented")
+func (UnimplementedTransactionServiceServer) CreateTransaction(context.Context, *CreateTransactionRequest) (*TransactionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateTransaction not implemented")
 }
-func (UnimplementedTransactionServiceServer) Payment(context.Context, *PaymentRequest) (*TransactionResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method Payment not implemented")
-}
-func (UnimplementedTransactionServiceServer) TransferAsync(context.Context, *TransferRequest) (*AsyncResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method TransferAsync not implemented")
+func (UnimplementedTransactionServiceServer) CreateTransactionAsync(context.Context, *CreateTransactionRequest) (*TransactionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateTransactionAsync not implemented")
 }
 func (UnimplementedTransactionServiceServer) GetHistory(context.Context, *GetHistoryRequest) (*TransactionListResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetHistory not implemented")
@@ -150,56 +148,38 @@ func RegisterTransactionServiceServer(s grpc.ServiceRegistrar, srv TransactionSe
 	s.RegisterService(&TransactionService_ServiceDesc, srv)
 }
 
-func _TransactionService_Transfer_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(TransferRequest)
+func _TransactionService_CreateTransaction_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateTransactionRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(TransactionServiceServer).Transfer(ctx, in)
+		return srv.(TransactionServiceServer).CreateTransaction(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: TransactionService_Transfer_FullMethodName,
+		FullMethod: TransactionService_CreateTransaction_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(TransactionServiceServer).Transfer(ctx, req.(*TransferRequest))
+		return srv.(TransactionServiceServer).CreateTransaction(ctx, req.(*CreateTransactionRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _TransactionService_Payment_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(PaymentRequest)
+func _TransactionService_CreateTransactionAsync_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateTransactionRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(TransactionServiceServer).Payment(ctx, in)
+		return srv.(TransactionServiceServer).CreateTransactionAsync(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: TransactionService_Payment_FullMethodName,
+		FullMethod: TransactionService_CreateTransactionAsync_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(TransactionServiceServer).Payment(ctx, req.(*PaymentRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _TransactionService_TransferAsync_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(TransferRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(TransactionServiceServer).TransferAsync(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: TransactionService_TransferAsync_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(TransactionServiceServer).TransferAsync(ctx, req.(*TransferRequest))
+		return srv.(TransactionServiceServer).CreateTransactionAsync(ctx, req.(*CreateTransactionRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -248,16 +228,12 @@ var TransactionService_ServiceDesc = grpc.ServiceDesc{
 	HandlerType: (*TransactionServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
-			MethodName: "Transfer",
-			Handler:    _TransactionService_Transfer_Handler,
+			MethodName: "CreateTransaction",
+			Handler:    _TransactionService_CreateTransaction_Handler,
 		},
 		{
-			MethodName: "Payment",
-			Handler:    _TransactionService_Payment_Handler,
-		},
-		{
-			MethodName: "TransferAsync",
-			Handler:    _TransactionService_TransferAsync_Handler,
+			MethodName: "CreateTransactionAsync",
+			Handler:    _TransactionService_CreateTransactionAsync_Handler,
 		},
 		{
 			MethodName: "GetHistory",

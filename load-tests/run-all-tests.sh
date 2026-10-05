@@ -1,39 +1,42 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# Все сценарии подряд с сохранением итогов в load-tests/results/<label>-<время>/.
+#   LABEL=micro BASE_URL=http://localhost:8080 ./load-tests/run-all-tests.sh
+#   LABEL=micro-nginx BASE_URL=http://localhost ./load-tests/run-all-tests.sh
+#   TESTS="smoke spike" ./load-tests/run-all-tests.sh   — только выбранные
+# После прогона для микросервисов выполняется сверка БД (RECONCILE=0 — пропустить,
+# например для монолита).
+set -uo pipefail
+cd "$(dirname "$0")/.."
 
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-cd "$SCRIPT_DIR/.."
+LABEL=${LABEL:-run}
+BASE_URL=${BASE_URL:-http://localhost:8080}
+TESTS=${TESTS:-"smoke load stress spike full"}
+RECONCILE=${RECONCILE:-1}
+OUT_DIR="$PWD/load-tests/results/${LABEL}-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$OUT_DIR"
+
+declare -A FILES=([smoke]=smoke-test [load]=load-test [stress]=stress-test [spike]=spike-test [full]=full-scenario)
 
 echo "==================================="
-echo "Bank Prototype - Load Testing Suite"
+echo "Bank - Load Testing Suite ($LABEL, $BASE_URL)"
+echo "Результаты: $OUT_DIR"
 echo "==================================="
-echo ""
+for t in $TESTS; do
+    file=${FILES[$t]:-}
+    [ -z "$file" ] && { echo "неизвестный тест: $t"; continue; }
+    echo
+    echo ">>> $t"
+    k6 run --no-usage-report -e BASE_URL="$BASE_URL" \
+        --summary-export "$OUT_DIR/$t.json" \
+        "load-tests/scenarios/$file.js" 2>&1 | tee "$OUT_DIR/$t.txt"
+    echo "exit=${PIPESTATUS[0]}" >> "$OUT_DIR/$t.txt"
+done
 
-mkdir -p load-tests/results
-
-echo "[1/5] Running Smoke Test..."
-k6 run load-tests/scenarios/smoke-test.js
-
-echo ""
-echo "[2/5] Running Load Test..."
-k6 run load-tests/scenarios/load-test.js
-
-echo ""
-echo "[3/5] Running Stress Test..."
-k6 run load-tests/scenarios/stress-test.js
-
-echo ""
-echo "[4/5] Running Spike Test..."
-k6 run load-tests/scenarios/spike-test.js
-
-echo ""
-echo "[5/5] Running Full Scenario Test..."
-k6 run load-tests/scenarios/full-scenario.js
-
-echo ""
-echo "==================================="
-echo "All tests completed!"
-echo "Results saved in load-tests/results/"
-echo "==================================="
-
-ls -lh load-tests/results/
-
+if [ "$RECONCILE" = "1" ]; then
+    echo
+    echo ">>> сверка БД (ждём, пока recovery доведёт pending-записи)"
+    sleep 40
+    go run ./cmd/reconcile 2>&1 | tee "$OUT_DIR/reconcile.txt"
+fi
+echo
+echo "Готово: $OUT_DIR"

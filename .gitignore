@@ -1,13 +1,20 @@
+# IDE
 .idea/
+.vscode/
 *.iml
 
 # Go
 *.exe
 *.test
 *.out
+/bin/
 
 # Environment
 .env
+
+# Результаты нагрузочных тестов (сохраняются локально, в репозиторий не попадают)
+load-tests/results/*
+!load-tests/results/.gitkeep
 
 # OS
 .DS_Store

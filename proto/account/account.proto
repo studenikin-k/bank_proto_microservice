@@ -2,16 +2,25 @@ syntax = "proto3";
 
 package account;
 
-option go_package = "bank-prototype/proto/account;accountpb";
+option go_package = "bank_proto_microservice/proto/account;accountpb";
 
+// Все денежные суммы передаются как int64 в копейках.
 service AccountService {
   rpc CreateAccount(CreateAccountRequest) returns (AccountResponse);
   rpc GetAccount(GetAccountRequest) returns (AccountResponse);
   rpc GetUserAccounts(GetUserAccountsRequest) returns (AccountListResponse);
   rpc DeleteAccount(DeleteAccountRequest) returns (DeleteAccountResponse);
 
-  // Метод вызывается Transaction Service для атомарного списания/начисления
-  rpc UpdateBalance(UpdateBalanceRequest) returns (UpdateBalanceResponse);
+  // Шаг саги перевода: в одной локальной транзакции списывает amount + fee со счёта
+  // from_account_id и зачисляет amount на счёт to_account_id.
+  // Идемпотентен по transfer_id: повторный вызов не списывает деньги второй раз.
+  rpc ApplyTransfer(ApplyTransferRequest) returns (ApplyTransferResponse);
+
+  // Фиксирует окончательный исход перевода, результат которого неизвестен
+  // Transaction Service (таймаут, обрыв связи, падение процесса).
+  // Если перевод ещё не применён, transfer_id навсегда помечается отменённым,
+  // и поздний ApplyTransfer с этим id будет отклонён.
+  rpc ResolveTransfer(ResolveTransferRequest) returns (ResolveTransferResponse);
 }
 
 message CreateAccountRequest {
@@ -41,7 +50,7 @@ message DeleteAccountResponse {
 message AccountResponse {
   string id = 1;
   string user_id = 2;
-  double balance = 3;
+  int64 balance = 3; // в копейках
   string status = 4;
   string created_at = 5;
 }
@@ -55,16 +64,28 @@ message AccountListResponse {
   bool can_create_more = 6;
 }
 
-message UpdateBalanceRequest {
-  string from_account_id = 1;
-  string to_account_id = 2;
-  double amount = 3;
-  double fee_amount = 4;
-  double total_debit = 5;
-  string fee_account_id = 6;
+message ApplyTransferRequest {
+  string transfer_id = 1;     // UUID записи в Transaction Service, ключ идемпотентности
+  string user_id = 2;         // инициатор; должен владеть счётом списания
+  string from_account_id = 3;
+  string to_account_id = 4;
+  int64 amount = 5;           // зачисляется получателю
+  int64 fee = 6;              // комиссия банка, списывается сверх amount
 }
 
-message UpdateBalanceResponse {
-  bool success = 1;
-  string error_message = 2;
+message ApplyTransferResponse {
+  bool already_applied = 1;   // true, если перевод был применён раньше (повторный вызов)
+}
+
+message ResolveTransferRequest {
+  string transfer_id = 1;
+}
+
+message ResolveTransferResponse {
+  enum Outcome {
+    OUTCOME_UNSPECIFIED = 0;
+    APPLIED = 1;  // деньги переведены
+    ABORTED = 2;  // перевод не применён и уже не будет применён
+  }
+  Outcome outcome = 1;
 }

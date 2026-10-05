@@ -1,70 +1,190 @@
-version: '3.8'
+# Полный стенд: 3 PostgreSQL, Redis, 4 Go-сервиса и nginx перед репликами шлюза.
+#
+#   docker compose up -d --build --wait                          # 1 реплика шлюза
+#   GATEWAY_EXTRA_REPLICAS=3 docker compose up -d --build --wait # 1 + 3 = 4 реплики за nginx
+#
+# Точки входа: nginx — http://localhost (порт 80, балансирует между всеми репликами),
+#              основная реплика шлюза напрямую — http://localhost:8080 (без nginx).
+# Лимиты CPU каждого контейнера задаются переменными *_CPUS: для честного сравнения
+# с монолитом суммарный бюджет CPU обеих систем должен быть одинаковым.
+
+name: bank
+
+x-go-service: &go-service
+  image: bank-microservices:latest
+  build: .
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options: { max-size: "20m", max-file: "3" }
+
+x-postgres: &postgres
+  image: postgres:16-alpine
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+    interval: 2s
+    timeout: 3s
+    retries: 30
 
 services:
-  # 1. БД Пользователей (Auth Service)
+  # ---------- Хранилища ----------
   postgres_auth:
-    image: postgres:16-alpine
-    container_name: bank_postgres_auth
-    environment:
-      POSTGRES_USER: auth_user
-      POSTGRES_PASSWORD: auth_password
-      POSTGRES_DB: auth_db
-    ports:
-      - "5431:5432"
+    <<: *postgres
+    environment: { POSTGRES_USER: auth_user, POSTGRES_PASSWORD: auth_password, POSTGRES_DB: auth_db }
+    ports: ["5431:5432"]
+    cpus: ${PG_CPUS:-2}
     volumes:
-      - pg_auth_data:/var/lib/postgresql/data
-      - ./migrations/auth/000001_init_auth.up.sql:/docker-entrypoint-initdb.d/init.sql
-    restart: unless-stopped
+      - auth_pgdata:/var/lib/postgresql/data
+      - ./migrations/auth/000001_init_auth.up.sql:/docker-entrypoint-initdb.d/000001_init.sql:ro
 
-  # 2. БД Счетов (Account Service)
   postgres_accounts:
-    image: postgres:16-alpine
-    container_name: bank_postgres_accounts
-    environment:
-      POSTGRES_USER: account_user
-      POSTGRES_PASSWORD: account_password
-      POSTGRES_DB: account_db
-    ports:
-      - "5432:5432"
+    <<: *postgres
+    environment: { POSTGRES_USER: account_user, POSTGRES_PASSWORD: account_password, POSTGRES_DB: account_db }
+    ports: ["5432:5432"]
+    cpus: ${PG_CPUS:-2}
     volumes:
-      - pg_account_data:/var/lib/postgresql/data
-      - ./migrations/account/000001_init_account.up.sql:/docker-entrypoint-initdb.d/init.sql
-    restart: unless-stopped
+      - account_pgdata:/var/lib/postgresql/data
+      - ./migrations/account/000001_init_account.up.sql:/docker-entrypoint-initdb.d/000001_init.sql:ro
 
-  # 3. БД Транзакций (Transaction Service)
   postgres_transactions:
-    image: postgres:16-alpine
-    container_name: bank_postgres_transactions
-    environment:
-      POSTGRES_USER: tx_user
-      POSTGRES_PASSWORD: tx_password
-      POSTGRES_DB: tx_db
-    ports:
-      - "5433:5432"
+    <<: *postgres
+    environment: { POSTGRES_USER: tx_user, POSTGRES_PASSWORD: tx_password, POSTGRES_DB: tx_db }
+    ports: ["5433:5432"]
+    cpus: ${PG_CPUS:-2}
     volumes:
-      - pg_tx_data:/var/lib/postgresql/data
-      - ./migrations/transaction/000001_init_transaction.up.sql:/docker-entrypoint-initdb.d/init.sql
-    restart: unless-stopped
+      - tx_pgdata:/var/lib/postgresql/data
+      - ./migrations/transaction/000001_init_transaction.up.sql:/docker-entrypoint-initdb.d/000001_init.sql:ro
 
-  # 4. Общий Redis с изоляцией
   redis:
     image: redis:7.4-alpine
-    container_name: bank_redis
-    ports:
-      - "6379:6379"
     restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports: ["6379:6379"]
+    cpus: ${REDIS_CPUS:-1}
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # ---------- Сервисы ----------
+  auth:
+    <<: *go-service
+    command: ["/app/auth_service"]
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      GRPC_ADDR: ":50051"
+      DEBUG_ADDR: ":6060"
+      DATABASE_URL: postgres://auth_user:auth_password@postgres_auth:5432/auth_db?sslmode=disable
+      DB_MAX_CONNS: ${AUTH_DB_MAX_CONNS:-20}
+      JWT_SECRET: ${JWT_SECRET:-dev-only-jwt-secret-change-me}
+      BCRYPT_COST: ${BCRYPT_COST:-10}
+    ports: ["50051:50051"]
+    cpus: ${AUTH_CPUS:-2}
+    depends_on:
+      postgres_auth: { condition: service_healthy }
+    healthcheck: &grpc-healthcheck
+      test: ["CMD", "/app/auth_service", "healthcheck"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  account:
+    <<: *go-service
+    command: ["/app/account_service"]
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      GRPC_ADDR: ":50052"
+      DEBUG_ADDR: ":6060"
+      DATABASE_URL: postgres://account_user:account_password@postgres_accounts:5432/account_db?sslmode=disable
+      DB_MAX_CONNS: ${ACCOUNT_DB_MAX_CONNS:-32}
+      DB_LOCK_TIMEOUT: ${ACCOUNT_DB_LOCK_TIMEOUT:-2s}
+      REDIS_ADDR: redis:6379
+      CACHE_TTL: ${CACHE_TTL:-30s}
+      ACCOUNT_OPENING_BALANCE: ${ACCOUNT_OPENING_BALANCE:-20000.00}
+      FEE_SWEEP_INTERVAL: ${FEE_SWEEP_INTERVAL:-5s}
+    ports: ["50052:50052"]
+    cpus: ${ACCOUNT_CPUS:-2}
+    depends_on:
+      postgres_accounts: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    healthcheck:
+      <<: *grpc-healthcheck
+      test: ["CMD", "/app/account_service", "healthcheck"]
+
+  transaction:
+    <<: *go-service
+    command: ["/app/transaction_service"]
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      GRPC_ADDR: ":50053"
+      DEBUG_ADDR: ":6060"
+      DATABASE_URL: postgres://tx_user:tx_password@postgres_transactions:5432/tx_db?sslmode=disable
+      DB_MAX_CONNS: ${TX_DB_MAX_CONNS:-32}
+      ACCOUNT_SERVICE_ADDR: account:50052
+      ACCOUNT_CALL_TIMEOUT: ${ACCOUNT_CALL_TIMEOUT:-3s}
+      RECOVERY_INTERVAL: ${RECOVERY_INTERVAL:-5s}
+      RECOVERY_AGE: ${RECOVERY_AGE:-30s}
+      WORKER_COUNT: ${WORKER_COUNT:-100}
+      WORKER_QUEUE_SIZE: ${WORKER_QUEUE_SIZE:-1000}
+    ports: ["50053:50053"]
+    cpus: ${TRANSACTION_CPUS:-2}
+    depends_on:
+      postgres_transactions: { condition: service_healthy }
+      account: { condition: service_healthy }
+    healthcheck:
+      <<: *grpc-healthcheck
+      test: ["CMD", "/app/transaction_service", "healthcheck"]
+
+  # Основная реплика шлюза: всегда одна, доступна напрямую на :8080.
+  gateway: &gateway
+    <<: *go-service
+    command: ["/app/api-gateway"]
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      PORT: "8080"
+      DEBUG_ADDR: ":6060"
+      JWT_SECRET: ${JWT_SECRET:-dev-only-jwt-secret-change-me}
+      AUTH_SERVICE_ADDR: auth:50051
+      ACCOUNT_SERVICE_ADDR: account:50052
+      TRANSACTION_SERVICE_ADDR: transaction:50053
+      REQUEST_TIMEOUT: ${REQUEST_TIMEOUT:-5s}
+    ports: ["8080:8080"]
+    cpus: ${GATEWAY_CPUS:-2}
+    # Все реплики шлюза отвечают на общее DNS-имя gateway-pool — его балансирует nginx.
+    networks:
+      default:
+        aliases: [gateway-pool]
+    depends_on:
+      auth: { condition: service_healthy }
+      account: { condition: service_healthy }
+      transaction: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "/app/api-gateway", "healthcheck"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # Дополнительные реплики шлюза (по умолчанию нет), доступны только через nginx.
+  gateway-extra:
+    <<: *gateway
+    ports: []
+    deploy:
+      replicas: ${GATEWAY_EXTRA_REPLICAS:-0}
 
   nginx:
     image: nginx:alpine
-    container_name: bank_nginx
-    ports:
-      - "80:80"
+    restart: unless-stopped
+    ports: ["80:80"]
+    cpus: ${NGINX_CPUS:-1}
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    restart: unless-stopped
+    depends_on:
+      gateway: { condition: service_healthy }
+      gateway-extra: { condition: service_healthy, required: false }
+
 volumes:
-  pg_auth_data:
-  pg_account_data:
-  pg_tx_data:
+  auth_pgdata:
+  account_pgdata:
+  tx_pgdata:

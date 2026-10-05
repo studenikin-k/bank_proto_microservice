@@ -1,7 +1,12 @@
-import http from 'k6/http';
+// Полный сценарий: одновременно регистрируются новые клиенты, идут банковские
+// операции и чтение. Пользователи для операций создаются в setup(): у каждого VU
+// в k6 своя копия глобальных переменных, поэтому общий массив между сценариями
+// не работает — данные между VU передаются только через setup().
 import { check, sleep } from 'k6';
-import { BASE_URL } from '../config.js';
-import exec from 'k6/execution';
+import { summaryTrendStats, randomAmount } from '../config.js';
+import { createUsers, getAccounts, health, history, pickPair, transfer } from '../lib/bank.js';
+
+const USERS = Number(__ENV.USERS || 50);
 
 export const options = {
     scenarios: {
@@ -37,125 +42,38 @@ export const options = {
     },
     thresholds: {
         http_req_duration: ['p(95)<1000'],
-        http_req_failed: ['rate<0.05'],
+        http_req_failed: ['rate<0.01'],
+        transfer_committed: ['rate>0.97'],
+        checks: ['rate>0.99'],
     },
+    setupTimeout: '5m',
+    summaryTrendStats,
 };
 
-const sharedUsers = [];
+export function setup() {
+    return { users: createUsers(USERS, 'full') };
+}
 
 export function userRegistration() {
-    const timestamp = Date.now();
-    const vuId = exec.vu.idInTest;
-    const random = Math.floor(Math.random() * 100000);
-    const username = 'fulluser_' + timestamp + '_' + vuId + '_' + random;
-    const password = 'Pass' + random + '!@#';
-
-    const registerPayload = JSON.stringify({
-        name: username,
-        password: password,
-    });
-
-    const registerRes = http.post(BASE_URL + '/register', registerPayload, {
-        headers: { 'Content-Type': 'application/json' },
-    });
-
-    if (registerRes.status === 201) {
-        const loginPayload = JSON.stringify({
-            name: username,
-            password: password,
-        });
-
-        const loginRes = http.post(BASE_URL + '/login', loginPayload, {
-            headers: { 'Content-Type': 'application/json' },
-        });
-
-        if (loginRes.status === 200) {
-            try {
-                const loginBody = JSON.parse(loginRes.body);
-                const token = loginBody.token;
-
-                const accountRes = http.post(BASE_URL + '/accounts', '{}', {
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': 'Bearer ' + token,
-                    },
-                });
-
-                if (accountRes.status === 201) {
-                    try {
-                        const accountBody = JSON.parse(accountRes.body);
-                        sharedUsers.push({
-                            username: username,
-                            password: password,
-                            token: token,
-                            account_id: accountBody.account_id,
-                        });
-                    } catch (e) {
-                        console.log('Failed to parse account');
-                    }
-                }
-            } catch (e) {
-                console.log('Failed to parse login');
-            }
-        }
-    }
-
+    const [user] = createUsers(1, 'fullreg');
+    check(getAccounts(user), { 'new user sees account': (r) => r.status === 200 && r.json('accounts').length === 1 });
     sleep(Math.random() * 3 + 2);
 }
 
-export function bankingOperations() {
-    if (sharedUsers.length === 0) {
-        sleep(2);
-        return;
+export function bankingOperations(data) {
+    const [from, to] = pickPair(data.users);
+    check(getAccounts(from), { 'accounts retrieved': (r) => r.status === 200 });
+    if (Math.random() > 0.3) {
+        const type = Math.random() > 0.6 ? 'transfer' : 'payment';
+        check(transfer(from, to, randomAmount(10, 40), type), { 'transaction committed': (r) => r.status === 201 });
     }
-
-    const user = sharedUsers[Math.floor(Math.random() * sharedUsers.length)];
-    const authHeader = { 'Authorization': 'Bearer ' + user.token };
-
-    const accountsRes = http.get(BASE_URL + '/accounts', { headers: authHeader });
-    check(accountsRes, {
-        'accounts retrieved': (r) => r.status === 200,
-    });
-
-    if (Math.random() > 0.3 && sharedUsers.length > 1) {
-        const targetUser = sharedUsers[Math.floor(Math.random() * sharedUsers.length)];
-        if (targetUser.account_id !== user.account_id) {
-            const amount = parseFloat((Math.random() * 30 + 10).toFixed(2));
-            const transactionType = Math.random() > 0.6 ? 'transfer' : 'payment';
-
-            const transactionPayload = JSON.stringify({
-                from_account_id: user.account_id,
-                to_account_id: targetUser.account_id,
-                amount: amount,
-                type: transactionType,
-            });
-
-            const transactionRes = http.post(BASE_URL + '/transactions', transactionPayload, {
-                headers: Object.assign({}, authHeader, { 'Content-Type': 'application/json' }),
-            });
-
-            check(transactionRes, {
-                'transaction completed': (r) => r.status === 201 || r.status === 400,
-            });
-        }
-    }
-
     sleep(Math.random() * 2 + 1);
 }
 
-export function readHeavy() {
-    if (sharedUsers.length === 0) {
-        sleep(1);
-        return;
-    }
-
-    const user = sharedUsers[Math.floor(Math.random() * sharedUsers.length)];
-    const authHeader = { 'Authorization': 'Bearer ' + user.token };
-
-    http.get(BASE_URL + '/health');
-    http.get(BASE_URL + '/accounts', { headers: authHeader });
-
-    sleep(Math.random() * 1 + 0.5);
+export function readHeavy(data) {
+    const [user] = pickPair(data.users);
+    check(health(), { 'health ok': (r) => r.status === 200 });
+    check(getAccounts(user), { 'accounts retrieved': (r) => r.status === 200 });
+    check(history(user), { 'history retrieved': (r) => r.status === 200 });
+    sleep(Math.random() + 0.5);
 }
-
-

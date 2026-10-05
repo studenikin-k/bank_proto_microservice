@@ -2,13 +2,12 @@ package middleware
 
 import (
 	"encoding/json"
-	"errors"
 	"strings"
-	"time"
 
-	"bank_proto_microservice/internal/utils"
+	"bank_proto_microservice/internal/apperr"
 
 	"github.com/golang-jwt/jwt/v4"
+	"github.com/google/uuid"
 	"github.com/valyala/fasthttp"
 )
 
@@ -17,73 +16,50 @@ type Claims struct {
 	jwt.RegisteredClaims
 }
 
+// AuthMiddleware проверяет JWT, выданный Auth Service (общий секрет HS256),
+// и кладёт user_id в контекст запроса. Шлюз проверяет только подлинность токена;
+// права на конкретные счета проверяют сервисы, которые владеют данными.
 type AuthMiddleware struct {
-	jwtSecret string
+	secret []byte
+	parser *jwt.Parser
 }
 
 func NewAuthMiddleware(secret string) *AuthMiddleware {
-	utils.LogSuccess("Middleware", "Инициализирован middleware авторизации JWT")
 	return &AuthMiddleware{
-		jwtSecret: secret,
+		secret: []byte(secret),
+		parser: jwt.NewParser(jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()})),
 	}
+}
+
+func unauthorized(ctx *fasthttp.RequestCtx, msg string) {
+	ctx.SetContentType("application/json; charset=utf-8")
+	ctx.SetStatusCode(fasthttp.StatusUnauthorized)
+	_ = json.NewEncoder(ctx).Encode(map[string]string{"error": msg, "code": apperr.ReasonUnauthenticated})
 }
 
 func (m *AuthMiddleware) RequireAuth(next fasthttp.RequestHandler) fasthttp.RequestHandler {
 	return func(ctx *fasthttp.RequestCtx) {
-		startTime := time.Now()
-
-		authHeader := string(ctx.Request.Header.Peek("Authorization"))
-		if authHeader == "" {
-			utils.LogWarning("Middleware", "Отсутствует заголовок Authorization")
-			ctx.SetStatusCode(fasthttp.StatusUnauthorized)
-			ctx.SetContentType("application/json")
-			_ = json.NewEncoder(ctx).Encode(map[string]string{"error": "Требуется авторизация"})
-			utils.LogResponse("RequireAuth", fasthttp.StatusUnauthorized, time.Since(startTime))
+		header := string(ctx.Request.Header.Peek("Authorization"))
+		if header == "" {
+			unauthorized(ctx, "требуется авторизация")
+			return
+		}
+		tokenString, ok := strings.CutPrefix(header, "Bearer ")
+		if !ok || tokenString == "" {
+			unauthorized(ctx, "неверный формат заголовка Authorization, ожидается: Bearer <token>")
 			return
 		}
 
-		parts := strings.Split(authHeader, " ")
-		if len(parts) != 2 || parts[0] != "Bearer" {
-			utils.LogWarning("Middleware", "Неверный формат заголовка Authorization")
-			ctx.SetStatusCode(fasthttp.StatusUnauthorized)
-			ctx.SetContentType("application/json")
-			_ = json.NewEncoder(ctx).Encode(map[string]string{"error": "Неверный формат токена"})
-			utils.LogResponse("RequireAuth", fasthttp.StatusUnauthorized, time.Since(startTime))
-			return
-		}
-
-		tokenString := parts[1]
-
-		token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
-			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, errors.New("unexpected signing method")
-			}
-			return []byte(m.jwtSecret), nil
+		claims := &Claims{}
+		token, err := m.parser.ParseWithClaims(tokenString, claims, func(*jwt.Token) (any, error) {
+			return m.secret, nil
 		})
-
-		if err != nil {
-			utils.LogWarning("Middleware", "Невалидный токен: %v", err)
-			ctx.SetStatusCode(fasthttp.StatusUnauthorized)
-			ctx.SetContentType("application/json")
-			_ = json.NewEncoder(ctx).Encode(map[string]string{"error": "Невалидный или истёкший токен"})
-			utils.LogResponse("RequireAuth", fasthttp.StatusUnauthorized, time.Since(startTime))
+		if err != nil || !token.Valid || uuid.Validate(claims.UserID) != nil {
+			unauthorized(ctx, "невалидный или истёкший токен")
 			return
 		}
 
-		claims, ok := token.Claims.(*Claims)
-		if !ok || !token.Valid {
-			utils.LogWarning("Middleware", "Токен не прошёл валидацию")
-			ctx.SetStatusCode(fasthttp.StatusUnauthorized)
-			ctx.SetContentType("application/json")
-			_ = json.NewEncoder(ctx).Encode(map[string]string{"error": "Невалидный токен"})
-			utils.LogResponse("RequireAuth", fasthttp.StatusUnauthorized, time.Since(startTime))
-			return
-		}
-
-		// Кладём user_id в контекст запроса для хэндлеров
 		ctx.SetUserValue("user_id", claims.UserID)
-		utils.LogDebug("Middleware", "Аутентифицирован пользователь: %s", claims.UserID)
-
 		next(ctx)
 	}
 }

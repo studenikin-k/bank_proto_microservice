@@ -2,28 +2,32 @@ syntax = "proto3";
 
 package transaction;
 
-option go_package = "bank-prototype/proto/transaction;transactionpb";
+option go_package = "bank_proto_microservice/proto/transaction;transactionpb";
 
+// Все денежные суммы передаются как int64 в копейках.
 service TransactionService {
-  rpc Transfer(TransferRequest) returns (TransactionResponse);
-  rpc Payment(PaymentRequest) returns (TransactionResponse);
-  rpc TransferAsync(TransferRequest) returns (AsyncResponse);
+  // Синхронный перевод или платёж. Сага: запись pending -> AccountService.ApplyTransfer
+  // -> completed / failed. При неизвестном исходе запись остаётся pending,
+  // её доводит до конца recovery-воркер.
+  rpc CreateTransaction(CreateTransactionRequest) returns (TransactionResponse);
+
+  // Асинхронный вариант: запись создаётся в статусе pending и сразу возвращается,
+  // исполняет её Worker Pool. Итог можно узнать через GetByID.
+  rpc CreateTransactionAsync(CreateTransactionRequest) returns (TransactionResponse);
+
   rpc GetHistory(GetHistoryRequest) returns (TransactionListResponse);
   rpc GetByID(GetByIDRequest) returns (TransactionResponse);
 }
 
-message TransferRequest {
+message CreateTransactionRequest {
   string user_id = 1;
-  string from_account_id = 2;
-  string to_account_id = 3;
-  double amount = 4;
-}
-
-message PaymentRequest {
-  string user_id = 1;
-  string from_account_id = 2;
-  string to_account_id = 3;
-  double amount = 4;
+  // Ключ идемпотентности клиента (заголовок Idempotency-Key). Повтор запроса с тем же
+  // ключом не создаёт второй перевод, а возвращает результат первого.
+  string idempotency_key = 2;
+  string type = 3;            // "transfer" (комиссия 1%) или "payment" (комиссия 3%)
+  string from_account_id = 4;
+  string to_account_id = 5;
+  int64 amount = 6;
 }
 
 message TransactionResponse {
@@ -31,22 +35,21 @@ message TransactionResponse {
   string type = 2;
   string from_account_id = 3;
   string to_account_id = 4;
-  double amount = 5;
+  int64 amount = 5;
   int32 fee_percent = 6;
-  double fee_amount = 7;
-  double total_debit = 8;
-  string status = 9;
-  string created_at = 10;
-}
-
-message AsyncResponse {
-  string status = 1;  // "accepted"
-  string message = 2; // "Transaction is being processed"
+  int64 fee_amount = 7;
+  int64 total_debit = 8;
+  string status = 9;          // pending | completed | failed
+  string failure_reason = 10; // машиночитаемая причина отказа, если status = failed
+  string created_at = 11;
+  string updated_at = 12;
+  bool idempotent_replay = 13; // ответ на повтор запроса с уже использованным ключом
 }
 
 message GetHistoryRequest {
   string user_id = 1;
-  optional string account_id = 2; // Опциональный фильтр
+  optional string account_id = 2; // фильтр по одному счёту пользователя
+  int32 limit = 3;                 // по умолчанию 50, максимум 500
 }
 
 message GetByIDRequest {

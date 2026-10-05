@@ -1,108 +1,44 @@
 package utils
 
 import (
-	"fmt"
-	"log"
-	"time"
+	"log/slog"
+	"os"
+	"strings"
 )
 
-const (
-	ColorReset  = "\033[0m"
-	ColorRed    = "\033[31m"
-	ColorGreen  = "\033[32m"
-	ColorYellow = "\033[33m"
-	ColorBlue   = "\033[34m"
-	ColorPurple = "\033[35m"
-	ColorCyan   = "\033[36m"
-	ColorWhite  = "\033[37m"
-	ColorGray   = "\033[90m"
-)
-
-func LogInfo(component, message string, args ...interface{}) {
-	formattedMessage := message
-	if len(args) > 0 {
-		formattedMessage = fmt.Sprintf(message, args...)
-	}
-	log.Printf("%s[INFO]%s %s[%s]%s %s",
-		ColorBlue, ColorReset,
-		ColorCyan, component, ColorReset,
-		formattedMessage)
-}
-
-func LogSuccess(component, message string, args ...interface{}) {
-	formattedMessage := message
-	if len(args) > 0 {
-		formattedMessage = fmt.Sprintf(message, args...)
-	}
-	log.Printf("%s[SUCCESS]%s %s[%s]%s %s",
-		ColorGreen, ColorReset,
-		ColorCyan, component, ColorReset,
-		formattedMessage)
-}
-
-func LogWarning(component, message string, args ...interface{}) {
-	formattedMessage := message
-	if len(args) > 0 {
-		formattedMessage = fmt.Sprintf(message, args...)
-	}
-	log.Printf("%s[WARNING]%s %s[%s]%s %s",
-		ColorYellow, ColorReset,
-		ColorCyan, component, ColorReset,
-		formattedMessage)
-}
-
-func LogError(component, message string, err error) {
-	if err != nil {
-		log.Printf("%s[ERROR]%s %s[%s]%s %s: %s%v%s",
-			ColorRed, ColorReset,
-			ColorCyan, component, ColorReset,
-			message,
-			ColorRed, err, ColorReset)
+// InitLogger настраивает стандартный slog для сервиса.
+//
+//	LOG_LEVEL  = debug | info | warn | error (по умолчанию info)
+//	LOG_FORMAT = text | json                 (по умолчанию text)
+//
+// На уровне info пишутся только события жизненного цикла и аномалии (неизвестный исход
+// перевода, восстановление, сбои). Лог каждого запроса — уровень debug: синхронная запись
+// строки на каждый запрос заметно искажает latency под нагрузкой.
+func InitLogger(service string) {
+	opts := &slog.HandlerOptions{Level: parseLevel(os.Getenv("LOG_LEVEL"))}
+	var h slog.Handler
+	if strings.EqualFold(os.Getenv("LOG_FORMAT"), "json") {
+		h = slog.NewJSONHandler(os.Stdout, opts)
 	} else {
-		log.Printf("%s[ERROR]%s %s[%s]%s %s",
-			ColorRed, ColorReset,
-			ColorCyan, component, ColorReset,
-			message)
+		h = slog.NewTextHandler(os.Stdout, opts)
 	}
+	slog.SetDefault(slog.New(h).With("service", service))
 }
 
-func LogDebug(component, message string, args ...interface{}) {
-	formattedMessage := message
-	if len(args) > 0 {
-		formattedMessage = fmt.Sprintf(message, args...)
+func parseLevel(s string) slog.Level {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
 	}
-	log.Printf("%s[DEBUG]%s %s[%s]%s %s",
-		ColorPurple, ColorReset,
-		ColorCyan, component, ColorReset,
-		formattedMessage)
+	return slog.LevelInfo
 }
 
-func LogRequest(method, path, userID string) {
-	log.Printf("%s[REQUEST]%s %s%s%s %s | UserID: %s%s%s",
-		ColorCyan, ColorReset,
-		ColorWhite, method, ColorReset,
-		path,
-		ColorYellow, userID, ColorReset)
-}
-
-func LogResponse(path string, statusCode int, duration time.Duration) {
-	color := ColorGreen
-	if statusCode >= 400 && statusCode < 500 {
-		color = ColorYellow
-	} else if statusCode >= 500 {
-		color = ColorRed
-	}
-
-	log.Printf("%s[RESPONSE]%s %s | Status: %s%d%s | Duration: %s%v%s",
-		ColorGray, ColorReset,
-		path,
-		color, statusCode, ColorReset,
-		ColorWhite, duration, ColorReset)
-}
-
-func LogDB(operation, query string) {
-	log.Printf("%s[DB]%s %s[%s]%s %s",
-		ColorGray, ColorReset,
-		ColorWhite, operation, ColorReset,
-		query)
+// Fatal пишет ошибку в лог и завершает процесс.
+func Fatal(msg string, args ...any) {
+	slog.Error(msg, args...)
+	os.Exit(1)
 }

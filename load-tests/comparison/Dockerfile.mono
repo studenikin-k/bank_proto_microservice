@@ -1,0 +1,15 @@
+ARG GO_IMAGE=golang:1.27-alpine
+FROM ${GO_IMAGE} AS build
+WORKDIR /src
+ENV GOTOOLCHAIN=local
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN go version && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/api ./cmd/api
+FROM alpine:3.22
+RUN adduser -D -u 10001 app
+WORKDIR /app
+COPY --from=build /out/api /app/api
+COPY --from=build /src/migrations /app/migrations
+USER app
+CMD ["/app/api"]

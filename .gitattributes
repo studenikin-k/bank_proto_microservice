@@ -1,0 +1,4 @@
+# Всегда LF: shell-скрипты, Dockerfile и конфиги с CRLF ломаются в Linux-контейнерах.
+* text=auto eol=lf
+*.png binary
+*.docx binary

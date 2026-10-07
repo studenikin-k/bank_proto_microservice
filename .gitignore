@@ -19,3 +19,9 @@ load-tests/results/*
 # OS
 .DS_Store
 Thumbs.db
+
+# Временные файлы Python и документов
+__pycache__/
+*.py[cod]
+~$*.docx
+*Zone.Identifier

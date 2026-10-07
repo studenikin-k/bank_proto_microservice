@@ -1,0 +1,7 @@
+.git
+.idea
+.vscode
+load-tests
+bin
+*.md
+course-report/

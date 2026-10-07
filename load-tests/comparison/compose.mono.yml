@@ -1,0 +1,52 @@
+# Disposable comparison project only. No host database/Redis ports.
+name: bank-course-comparison
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "20m", max-file: "3" }
+services:
+  db:
+    image: postgres:16-alpine
+    cpus: 4.5
+    mem_limit: 3g
+    logging: *logging
+    labels: { org.bank.course.comparison: "1" }
+    environment: { POSTGRES_USER: user, POSTGRES_PASSWORD: pass, POSTGRES_DB: bank }
+    volumes: [mono_pg:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d bank"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  redis:
+    image: redis:7.4-alpine
+    cpus: 0.5
+    mem_limit: 512m
+    logging: *logging
+    labels: { org.bank.course.comparison: "1" }
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  api:
+    image: bank-compare-mono:local
+    build:
+      context: ${MONOLITH_DIR:?Set MONOLITH_DIR to the monolith path in WSL}
+      dockerfile: ${COMPARISON_DIR:?Set COMPARISON_DIR}/Dockerfile.mono
+      args: { GO_IMAGE: "${GO_IMAGE:-golang:1.27-alpine}" }
+    cpus: 4
+    mem_limit: 2g
+    logging: *logging
+    labels: { org.bank.course.comparison: "1" }
+    ports: ["127.0.0.1:18080:8080"]
+    environment:
+      DB_URL: postgres://user:pass@db:5432/bank?sslmode=disable
+      REDIS_URL: redis:6379
+      LOG_LEVEL: warn
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_healthy }
+volumes:
+  mono_pg:
+    labels: { org.bank.course.comparison: "1" }
